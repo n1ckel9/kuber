@@ -1,0 +1,22 @@
+# Деплой API на Render (https://render.com) — бесплатный тариф.
+# Как задеплоить (один раз) — см. DEPLOY.md:
+#   1. Залей проект на GitHub.
+#   2. На render.com → New → Blueprint → подключи репозиторий → Render прочитает этот файл.
+#   3. Получишь адрес вида https://kuber-api.onrender.com — впиши его в EXPO_PUBLIC_API_URL.
+services:
+  - type: web
+    name: kuber-api
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Админы (через запятую), монетизация — при необходимости:
+      # - key: ADMIN_EMAILS
+      #   value: "you@gmail.com"
+      # - key: BID_FEE
+      #   value: "0"
