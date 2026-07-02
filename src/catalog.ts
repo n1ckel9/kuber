@@ -1,44 +1,30 @@
-import { Catalog, City, Order, Region, Service, ServiceKey } from "./types";
+import { Catalog, Category, City, Order, Region, Service, ServiceKey } from "./types";
 
 // Услуги по умолчанию. Используются как запасной вариант (offline) и как
 // исходный реестр для отрисовки иконок/цветов до загрузки справочника с сервера.
+// Должны совпадать с server/seed.js.
 const defaultServices: Service[] = [
-  {
-    key: "water",
-    title: "Водовоз",
-    subtitle: "Питьевая и тех. вода",
-    icon: "tanker-truck",
-    accent: "#1683A7"
-  },
-  {
-    key: "septic",
-    title: "Ассенизатор",
-    subtitle: "Септик, выгребная яма",
-    icon: "truck-cargo-container",
-    accent: "#6E7C45"
-  },
-  {
-    key: "dump",
-    title: "КамАЗ",
-    subtitle: "Песок, щебень, вывоз",
-    icon: "dump-truck",
-    accent: "#C1642E"
-  },
-  {
-    key: "crane",
-    title: "Манипулятор",
-    subtitle: "Погрузка и доставка",
-    icon: "crane",
-    accent: "#7354A8"
-  },
-  {
-    key: "tractor",
-    title: "Спецтехника",
-    subtitle: "Трактор, экскаватор",
-    icon: "excavator",
-    accent: "#B8942E"
-  }
+  { key: "water", title: "Водовоз", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "transport" },
+  { key: "dump", title: "КамАЗ", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "transport" },
+  { key: "transport", title: "Перевозки", subtitle: "Грузовики, фургоны", icon: "truck", accent: "#556B8C", category: "transport" },
+  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "transport" },
+  { key: "crane", title: "Манипулятор", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "equipment" },
+  { key: "tractor", title: "Спецтехника", subtitle: "Трактор, экскаватор", icon: "excavator", accent: "#B8942E", category: "equipment" },
+  { key: "septic", title: "Ассенизатор", subtitle: "Септик, выгребная яма", icon: "truck-cargo-container", accent: "#6E7C45", category: "utilities" },
+  { key: "plumber", title: "Сантехник", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "utilities" },
+  { key: "electrician", title: "Электрик", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "electric" },
+  { key: "welder", title: "Сварщик", subtitle: "Металлоконструкции", icon: "fire", accent: "#C7503A", category: "electric" },
+  { key: "lowvoltage", title: "Слаботочник", subtitle: "Сети, видеонаблюдение", icon: "ethernet-cable", accent: "#0E8A9C", category: "electric" }
 ];
+
+const defaultCategories: Category[] = [
+  { key: "transport", title: "Доставка и вывоз" },
+  { key: "equipment", title: "Спецтехника" },
+  { key: "utilities", title: "Сантехника и вода" },
+  { key: "electric", title: "Электрика и монтаж" }
+];
+
+const allServiceKeys = defaultServices.map((s) => s.key);
 
 const fallbackCities: City[] = [
   {
@@ -48,7 +34,7 @@ const fallbackCities: City[] = [
     region: "Республика Саха (Якутия)",
     center: [129.732178, 62.027833],
     zoom: 12,
-    services: ["water", "septic", "dump", "crane", "tractor"]
+    services: allServiceKeys
   },
   {
     id: "kazan",
@@ -57,7 +43,7 @@ const fallbackCities: City[] = [
     region: "Татарстан",
     center: [49.106414, 55.796127],
     zoom: 11,
-    services: ["water", "septic", "dump", "crane", "tractor"]
+    services: allServiceKeys
   },
   {
     id: "novosibirsk",
@@ -66,7 +52,7 @@ const fallbackCities: City[] = [
     region: "Новосибирская область",
     center: [82.92043, 55.030204],
     zoom: 11,
-    services: ["water", "septic", "dump", "tractor"]
+    services: ["water", "septic", "dump", "tractor", "transport", "electrician", "plumber"]
   }
 ];
 
@@ -79,7 +65,8 @@ const fallbackRegions: Region[] = [
 export const fallbackCatalog: Catalog = {
   regions: fallbackRegions,
   cities: fallbackCities,
-  services: defaultServices
+  services: defaultServices,
+  categories: defaultCategories
 };
 
 // Запасные заказы (когда сервер недоступен).

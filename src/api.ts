@@ -4,14 +4,19 @@ import {
   AuthResponse,
   Bid,
   Catalog,
+  ExecutorProfile,
   LoginPayload,
   Message,
   Notifications,
   Order,
+  PendingVerificationRequest,
+  PricingCell,
   RegisterPayload,
   Role,
+  SavedPlace,
   Schedule,
   ServiceKey,
+  VerificationRequest,
   Wallet
 } from "./types";
 import { fallbackCatalog } from "./catalog";
@@ -150,8 +155,225 @@ export async function decideVerification(id: string, approve: boolean) {
   });
 }
 
-export async function fetchUsers() {
-  return request<Account[]>("/api/admin/users");
+export async function fetchUsers(params?: { q?: string; limit?: number; offset?: number }) {
+  const p = new URLSearchParams();
+  if (params?.q) p.append("q", params.q);
+  p.append("limit", String(params?.limit ?? 20));
+  p.append("offset", String(params?.offset ?? 0));
+  return request<Account[]>(`/api/admin/users?${p.toString()}`);
+}
+
+export type AnalyticsTotals = {
+  orders: number;
+  gmv: number;
+  doneOrders: number;
+  doneGmv: number;
+  activeClients: number;
+  activeDrivers: number;
+  newClients: number;
+  newDrivers: number;
+  clientLogins: number;
+  driverLogins: number;
+  coinRevenue: number;
+  repeatRate: number;
+};
+
+export type AnalyticsCell = {
+  cityId: string;
+  cityName: string;
+  serviceKey: string;
+  serviceName: string;
+  count: number;
+  gmv: number;
+  fillRate: number;
+  avgBids: number;
+  supply: number;
+};
+
+export type DemandAnalytics = {
+  days: number;
+  cityId: string | null;
+  totals: AnalyticsTotals;
+  byCategory: { key: string; title: string; count: number; gmv: number }[];
+  byService: { key: string; title: string; category: string; count: number; gmv: number; avgPrice: number }[];
+  byCity: { key: string; title: string; count: number; gmv: number }[];
+  matrix: AnalyticsCell[];
+};
+
+export async function fetchAnalytics(days: number, cityId?: string | null) {
+  const q = cityId ? `?days=${days}&cityId=${encodeURIComponent(cityId)}` : `?days=${days}`;
+  return request<DemandAnalytics>(`/api/admin/analytics${q}`);
+}
+
+// --- Массовые цены ---
+export async function updatePricingBulk(
+  rules: { cityId: string; serviceKey: ServiceKey; coinCost: number; enabled: boolean }[]
+) {
+  return request<{ ok: boolean; count: number }>("/api/admin/pricing/bulk", {
+    method: "POST",
+    body: JSON.stringify({ rules })
+  });
+}
+
+// --- Модерация пользователей ---
+export async function adminAdjustBalance(accountId: string, amount: number, note: string) {
+  return request<{ ok: boolean; balance: number }>(`/api/admin/users/${accountId}/balance`, {
+    method: "POST",
+    body: JSON.stringify({ amount, note })
+  });
+}
+
+export async function adminSetBanned(accountId: string, banned: boolean) {
+  return request<{ ok: boolean; banned: boolean }>(`/api/admin/users/${accountId}/ban`, {
+    method: "POST",
+    body: JSON.stringify({ banned })
+  });
+}
+
+// --- Ленты для админа ---
+export type AdminOrder = {
+  id: string;
+  cityId: string;
+  service: ServiceKey;
+  price: number;
+  status: string;
+  customerName: string;
+  bids: number;
+  createdAt: number;
+};
+
+export type AdminTransaction = {
+  id: string;
+  accountId: string;
+  accountName: string;
+  type: string;
+  amount: number;
+  balanceAfter: number;
+  note: string;
+  createdAt: number;
+};
+
+export async function fetchAdminOrders(params?: {
+  cityId?: string | null;
+  status?: string | null;
+  limit?: number;
+  offset?: number;
+}) {
+  const q = new URLSearchParams();
+  if (params?.cityId) q.append("cityId", params.cityId);
+  if (params?.status) q.append("status", params.status);
+  q.append("limit", String(params?.limit ?? 20));
+  q.append("offset", String(params?.offset ?? 0));
+  return request<AdminOrder[]>(`/api/admin/orders?${q.toString()}`);
+}
+
+export async function fetchAdminTransactions(limit = 20, offset = 0) {
+  return request<{ transactions: AdminTransaction[] }>(
+    `/api/admin/transactions?limit=${limit}&offset=${offset}`
+  );
+}
+
+// --- Управление каталогом ---
+export async function adminAddCity(payload: {
+  id: string;
+  regionId: string;
+  name: string;
+  centerLng: number;
+  centerLat: number;
+  zoom?: number;
+}) {
+  return request<{ ok: boolean; id: string }>("/api/admin/cities", {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+export async function adminAddService(payload: {
+  key: string;
+  title: string;
+  subtitle: string;
+  icon: string;
+  accent: string;
+  category: string;
+}) {
+  return request<{ ok: boolean; key: string }>("/api/admin/services", {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+export async function adminSetCityService(cityId: string, serviceKey: string, enabled: boolean) {
+  return request<{ ok: boolean }>("/api/admin/city-services", {
+    method: "POST",
+    body: JSON.stringify({ cityId, serviceKey, enabled })
+  });
+}
+
+// Публичный профиль исполнителя (портфолио, отзывы) — для заказчика.
+export async function fetchExecutorProfile(executorId: string) {
+  return request<ExecutorProfile>(`/api/executors/${executorId}`);
+}
+
+// Обновление собственного портфолио исполнителя.
+export async function updatePortfolio(payload: {
+  bio?: string;
+  addItem?: { title: string; description: string; photoUrl: string };
+  deleteItemId?: string;
+}) {
+  return request<ExecutorProfile>("/api/account/portfolio", {
+    method: "PATCH",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+// --- Верификация по документу ---
+
+export async function createVerificationRequest(payload: {
+  serviceKey: ServiceKey;
+  docType: string;
+  photo: string;
+}) {
+  return request<VerificationRequest>("/api/account/verification-request", {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+export async function fetchMyVerifications() {
+  try {
+    return await request<VerificationRequest[]>("/api/account/verification-requests");
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchPendingVerificationRequests() {
+  return request<PendingVerificationRequest[]>("/api/admin/verification-requests");
+}
+
+export async function decideVerificationRequest(id: string, approve: boolean) {
+  return request<VerificationRequest>(`/api/admin/verification-requests/${id}`, {
+    method: "POST",
+    body: JSON.stringify({ approve })
+  });
+}
+
+// --- Монеты: цены по нишам (админ) ---
+
+export async function fetchPricingGrid() {
+  return request<{ grid: PricingCell[] }>("/api/admin/pricing");
+}
+
+export async function setPricingRule(payload: {
+  cityId: string;
+  serviceKey: ServiceKey;
+  coinCost: number;
+  enabled: boolean;
+}) {
+  return request<{ ok: boolean }>("/api/admin/pricing", {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
 }
 
 export async function registerPushToken(token: string) {
@@ -256,6 +478,49 @@ export async function fetchCatalog() {
   }
 }
 
+export type PriceHint = { count: number; min?: number; median?: number; max?: number };
+
+// Подсказка цены по (город × услуга) для формы заявки.
+export async function fetchPriceHint(cityId: string, service: string) {
+  try {
+    return await request<PriceHint>(
+      `/api/price-hint?cityId=${encodeURIComponent(cityId)}&service=${encodeURIComponent(service)}`
+    );
+  } catch {
+    return { count: 0 };
+  }
+}
+
+// Сколько исполнителей поблизости видят открытый заказ.
+export async function fetchReach(orderId: string) {
+  try {
+    return await request<{ reach: number }>(`/api/orders/${orderId}/reach`);
+  } catch {
+    return { reach: 0 };
+  }
+}
+
+// --- Сохранённые адреса заказчика ---
+
+export async function fetchPlaces() {
+  try {
+    return await request<SavedPlace[]>("/api/places");
+  } catch {
+    return [];
+  }
+}
+
+export async function createPlace(payload: { label: string; fromText: string; lng: number; lat: number }) {
+  return request<SavedPlace>("/api/places", {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+export async function deletePlace(id: string) {
+  return request<{ ok: boolean }>(`/api/places/${id}`, { method: "DELETE" });
+}
+
 // Лента заказчика — его заявки.
 export async function fetchMyOrders() {
   return request<Order[]>("/api/orders/mine");
@@ -271,7 +536,12 @@ export async function fetchJobs() {
   return request<Order[]>("/api/orders/jobs");
 }
 
-export type AppConfig = { bidFee: number; bidPercent: number };
+export type PricingRuleCompact = { c: string; s: string; p: number };
+export type AppConfig = {
+  bidFee: number;
+  bidPercent: number;
+  pricingRules?: PricingRuleCompact[];
+};
 
 export async function fetchConfig() {
   try {

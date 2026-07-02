@@ -5,6 +5,7 @@ import {
   ActivityIndicator,
   Animated,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -26,12 +27,33 @@ import {
   createBid,
   createOrder as createOrderOnServer,
   createSchedule as createScheduleOnServer,
+  adminAddCity,
+  adminAddService,
+  adminAdjustBalance,
+  adminSetBanned,
+  adminSetCityService,
+  createVerificationRequest,
   decideVerification,
+  decideVerificationRequest,
+  fetchAdminOrders,
+  fetchAdminTransactions,
+  updatePricingBulk,
   deleteOrder as deleteOrderOnServer,
   deleteSchedule as deleteScheduleOnServer,
+  fetchAnalytics,
   fetchBourse,
   fetchCatalog,
   fetchConfig,
+  fetchExecutorProfile,
+  fetchMyVerifications,
+  fetchPendingVerificationRequests,
+  fetchPlaces,
+  fetchPriceHint,
+  fetchPricingGrid,
+  fetchReach,
+  createPlace,
+  deletePlace,
+  setPricingRule as setPricingRuleOnServer,
   fetchJobs,
   fetchFavorites,
   fetchMe,
@@ -57,11 +79,12 @@ import {
   suggestAddress,
   toggleFavorite as toggleFavoriteOnServer,
   topUpWallet,
+  updatePortfolio,
   updateProfile,
   verifyAccount,
   withdrawWallet
 } from "./src/api";
-import type { GeocodeResult } from "./src/api";
+import type { AdminOrder, AdminTransaction, DemandAnalytics, GeocodeResult } from "./src/api";
 import { AuthScreen } from "./src/AuthScreen";
 import { fallbackCatalog, serviceByKey, setServiceRegistry } from "./src/catalog";
 import { formatKm, getCurrentPosition, haversineKm } from "./src/geo";
@@ -73,18 +96,27 @@ import {
   Account,
   AuthResponse,
   Catalog,
+  Category,
   City,
+  ExecutorProfile,
   Order,
+  OrderStatus,
+  PendingVerificationRequest,
+  PortfolioItem,
+  PricingCell,
   Role,
   Message,
   Notification,
+  SavedPlace,
   Schedule,
   Service,
   ServiceKey,
   Transaction,
+  VerificationRequest,
   ViewMode,
   Wallet
 } from "./src/types";
+import { pickImageAsBase64 } from "./src/imageUpload";
 
 // Форматирование без Intl (на Hermes/Android Intl ограничен и может падать).
 const rub = {
@@ -94,6 +126,24 @@ const rub = {
       .replace(/\B(?=(\d{3})+(?!\d))/g, " ");
   }
 };
+
+// Курс монеты: 1 монета = 10 ₽.
+const COIN_RATE = 10;
+const coinsToRub = (coins: number) => coins * COIN_RATE;
+
+// Фирменная монетка Кубера — золотой кружок с «К».
+function CoinIcon({ size = 18 }: { size?: number }) {
+  return (
+    <View
+      style={[
+        styles.coin,
+        { width: size, height: size, borderRadius: size / 2, borderWidth: Math.max(1, size / 12) }
+      ]}
+    >
+      <Text style={[styles.coinText, { fontSize: size * 0.62 }]}>К</Text>
+    </View>
+  );
+}
 
 export default function App() {
   const [bootReady, setBootReady] = useState(false);
@@ -128,11 +178,46 @@ export default function App() {
   const tabShift = useRef(new Animated.Value(0)).current;
   const [bidFee, setBidFee] = useState(0);
   const [bidPercent, setBidPercent] = useState(0);
+  // Нишевые цены отклика: "cityId|serviceKey" → стоимость в монетах.
+  const [pricingRules, setPricingRules] = useState<Map<string, number>>(new Map());
+
+  // Стоимость отклика на заказ в монетах: нишевая цена, иначе глобальный тариф.
+  const orderBidCost = useCallback(
+    (order: Order) => {
+      const niche = pricingRules.get(`${order.cityId}|${order.service}`);
+      if (niche !== undefined) {
+        return niche;
+      }
+      return bidFee + Math.round((order.price * bidPercent) / 100);
+    },
+    [pricingRules, bidFee, bidPercent]
+  );
   const [bidError, setBidError] = useState("");
   const [favorites, setFavorites] = useState<string[]>([]);
+  const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([]);
+  const [savePlaceOpen, setSavePlaceOpen] = useState(false);
+  const [savePlaceLabel, setSavePlaceLabel] = useState("");
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unread, setUnread] = useState(0);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [execProfile, setExecProfile] = useState<ExecutorProfile | null>(null);
+  const [execLoading, setExecLoading] = useState(false);
+
+  // Открыть публичный профиль исполнителя (портфолио, отзывы) — для заказчика.
+  async function openExecutor(executorId: string) {
+    if (!executorId) {
+      return;
+    }
+    setExecLoading(true);
+    setExecProfile(null);
+    try {
+      setExecProfile(await fetchExecutorProfile(executorId));
+    } catch {
+      setExecProfile(null);
+    } finally {
+      setExecLoading(false);
+    }
+  }
 
   const currentCity = catalog.cities.find((city) => city.id === cityId) ?? catalog.cities[0];
   const cityServices = useMemo(
@@ -141,6 +226,13 @@ export default function App() {
   );
   const selectedServiceData = serviceByKey(selectedService);
   const detailOrder = orders.find((order) => order.id === detailId);
+  // Для «Заказать снова»: последний выполненный заказ, иначе последний вообще.
+  const lastRepeatOrder = useMemo(() => {
+    if (role !== "client" || orders.length === 0) {
+      return null;
+    }
+    return orders.find((o) => o.status === "done") ?? orders[0];
+  }, [orders, role]);
 
   // Исполнителю на бирже: фильтр по рабочему радиусу + сортировка по близости.
   const displayOrders = useMemo(() => {
@@ -187,6 +279,7 @@ export default function App() {
       setServiceRegistry(nextCatalog.services);
       setBidFee(config.bidFee);
       setBidPercent(config.bidPercent);
+      setPricingRules(new Map((config.pricingRules ?? []).map((r) => [`${r.c}|${r.s}`, r.p])));
       setCityId((current) =>
         nextCatalog.cities.some((city) => city.id === current)
           ? current
@@ -238,6 +331,15 @@ export default function App() {
       void fetchFavorites().then(setFavorites).catch(() => {});
     } else {
       setFavorites([]);
+    }
+  }, [account]);
+
+  // Сохранённые адреса (для заказчика).
+  useEffect(() => {
+    if (account?.role === "client") {
+      void fetchPlaces().then(setSavedPlaces).catch(() => {});
+    } else {
+      setSavedPlaces([]);
     }
   }, [account]);
 
@@ -432,6 +534,42 @@ export default function App() {
     setPickerCenter(null);
   }
 
+  // Выбрать сохранённое место — подставить адрес и точку.
+  function pickSavedPlace(place: SavedPlace) {
+    setFrom(place.fromText);
+    setPickCoords([place.lng, place.lat]);
+    setPickLabel(place.fromText);
+    setGeoError("");
+  }
+
+  async function confirmSavePlace() {
+    if (!pickCoords || !savePlaceLabel.trim() || !from.trim()) {
+      return;
+    }
+    try {
+      const created = await createPlace({
+        label: savePlaceLabel.trim(),
+        fromText: from.trim(),
+        lng: pickCoords[0],
+        lat: pickCoords[1]
+      });
+      setSavedPlaces((cur) => [created, ...cur]);
+      setSavePlaceLabel("");
+      setSavePlaceOpen(false);
+    } catch {
+      setServerState("offline");
+    }
+  }
+
+  async function removeSavedPlace(id: string) {
+    try {
+      await deletePlace(id);
+      setSavedPlaces((cur) => cur.filter((p) => p.id !== id));
+    } catch {
+      setServerState("offline");
+    }
+  }
+
   function selectSuggestion(item: GeocodeResult) {
     setFrom(item.displayName);
     setPickCoords([item.lng, item.lat]);
@@ -465,6 +603,7 @@ export default function App() {
   }
 
   async function createOrder(repeatDays = 0) {
+    setGeoError("");
     const numericPrice = Number(price.replace(/\D/g, ""));
     if (!from.trim() || !details.trim() || !numericPrice || !currentCity) {
       return;
@@ -494,8 +633,13 @@ export default function App() {
       setPrice("");
       resetLocation();
       setServerState("sync");
-    } catch {
-      setServerState("offline");
+    } catch (e) {
+      // Сервер не смог определить адрес — просим уточнить точку (не «уходим в офлайн»).
+      if (e instanceof ApiError && e.status === 400) {
+        setGeoError(e.message);
+      } else {
+        setServerState("offline");
+      }
     }
   }
 
@@ -511,15 +655,17 @@ export default function App() {
   async function sendBid(orderId: string, bidPrice: number, eta: string) {
     setBidError("");
     try {
+      const target = orders.find((o) => o.id === orderId);
+      const fee = target ? orderBidCost(target) : 0;
       const bid = await createBid(orderId, { price: bidPrice, eta });
       setOrders((current) =>
         current.map((order) =>
           order.id === orderId ? { ...order, bids: [bid, ...order.bids] } : order
         )
       );
-      // если была плата за отклик — обновим баланс в профиле
-      if (bidFee > 0 && account) {
-        setAccount((current) => (current ? { ...current, balance: (current.balance ?? 0) - bidFee } : current));
+      // если была плата за отклик — обновим баланс в профиле (монеты)
+      if (fee > 0 && account) {
+        setAccount((current) => (current ? { ...current, balance: (current.balance ?? 0) - fee } : current));
       }
       setServerState("sync");
     } catch (e) {
@@ -614,16 +760,19 @@ export default function App() {
     }
   }
 
-  async function saveProfile(next: {
-    name: string;
-    role: Role;
-    cityId: string;
-    phone: string;
-    telegram: string;
-    services: ServiceKey[];
-    radiusKm: number;
-    available: boolean;
-  }) {
+  async function saveProfile(
+    next: {
+      name: string;
+      role: Role;
+      cityId: string;
+      phone: string;
+      telegram: string;
+      services: ServiceKey[];
+      radiusKm: number;
+      available: boolean;
+    },
+    onError?: (message: string) => void
+  ) {
     if (!account) {
       return;
     }
@@ -632,8 +781,11 @@ export default function App() {
       applyAccount(updated);
       setServerState("sync");
       setViewMode("orders");
-    } catch {
+    } catch (e) {
       setServerState("offline");
+      const message =
+        e instanceof ApiError ? e.message : "Не удалось сохранить. Проверьте соединение с интернетом.";
+      onError?.(message);
     }
   }
 
@@ -748,7 +900,15 @@ export default function App() {
               showsVerticalScrollIndicator={false}
               contentContainerStyle={styles.content}
             >
-              <AdminScreen />
+              <AdminScreen
+                catalog={catalog}
+                onCatalogChanged={() => {
+                  void fetchCatalog().then((next) => {
+                    setCatalog(next);
+                    setServiceRegistry(next.services);
+                  });
+                }}
+              />
             </ScrollView>
           ) : viewMode === "account" ? (
             <ScrollView
@@ -768,6 +928,8 @@ export default function App() {
                 onSaveConfig={saveConfig}
                 onVerify={verify}
                 onLogout={handleLogout}
+                savedPlaces={savedPlaces}
+                onDeletePlace={removeSavedPlace}
                 onBalanceChange={(balance) =>
                   setAccount((current) => (current ? { ...current, balance } : current))
                 }
@@ -780,11 +942,25 @@ export default function App() {
               keyboardShouldPersistTaps="handled"
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={loadOrders} />}
             >
+              {role === "client" && lastRepeatOrder ? (
+                <RepeatOrderCard order={lastRepeatOrder} onPress={() => repeatOrder(lastRepeatOrder)} />
+              ) : null}
               {role === "client" ? (
                 <CreateOrderPanel
                   services={cityServices}
+                  categories={catalog.categories ?? []}
                   selectedService={selectedService}
                   onSelectService={setSelectedService}
+                  savedPlaces={savedPlaces}
+                  onPickPlace={pickSavedPlace}
+                  onSavePlace={() => {
+                    if (!pickCoords) {
+                      setGeoError("Сначала укажите точку (карта или «Я здесь»).");
+                      return;
+                    }
+                    setSavePlaceLabel("");
+                    setSavePlaceOpen(true);
+                  }}
                   service={selectedServiceData}
                   cityName={currentCity?.name ?? ""}
                   cityId={cityId}
@@ -882,7 +1058,7 @@ export default function App() {
                       role={role}
                       accountId={account.id ?? ""}
                       distance={distanceText(detailOrder)}
-                      bidFee={bidFee + Math.round((detailOrder.price * bidPercent) / 100)}
+                      bidFee={orderBidCost(detailOrder)}
                       bidError={bidError}
                       favorites={favorites}
                       onToggleFavorite={toggleFavorite}
@@ -894,9 +1070,60 @@ export default function App() {
                       onConfirm={() => clientConfirm(detailOrder.id)}
                       onReview={(rating, text) => submitReview(detailOrder.id, rating, text)}
                       onRepeat={() => repeatOrder(detailOrder)}
+                      onOpenExecutor={openExecutor}
                     />
                   ) : null}
                 </ScrollView>
+              </View>
+            </View>
+          </Modal>
+
+          <ExecutorProfileModal
+            visible={execLoading || Boolean(execProfile)}
+            loading={execLoading}
+            profile={execProfile}
+            favorites={favorites}
+            onToggleFavorite={toggleFavorite}
+            onClose={() => {
+              setExecProfile(null);
+              setExecLoading(false);
+            }}
+          />
+
+          <Modal
+            visible={savePlaceOpen}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setSavePlaceOpen(false)}
+          >
+            <View style={styles.centerModalBackdrop}>
+              <View style={styles.centerModalCard}>
+                <Text style={styles.panelTitle}>Сохранить место</Text>
+                <Text style={styles.panelSubtitle} numberOfLines={2}>
+                  {from || "Текущая точка"}
+                </Text>
+                <TextInput
+                  value={savePlaceLabel}
+                  onChangeText={setSavePlaceLabel}
+                  placeholder="Название: Дом, Дача, Работа…"
+                  placeholderTextColor={colors.inkFaint}
+                  autoFocus
+                  maxLength={60}
+                  style={ui.input}
+                />
+                <View style={styles.rowGap}>
+                  <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => setSavePlaceOpen(false)}>
+                    <Text style={ui.ghostButtonText}>Отмена</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[ui.primaryButton, styles.flex, !savePlaceLabel.trim() && { opacity: 0.5 }]}
+                    onPress={confirmSavePlace}
+                    disabled={!savePlaceLabel.trim()}
+                  >
+                    <MaterialCommunityIcons name="content-save-outline" size={18} color={colors.accentText} />
+                    <Text style={ui.primaryButtonText}>Сохранить</Text>
+                  </Pressable>
+                </View>
               </View>
             </View>
           </Modal>
@@ -1010,8 +1237,28 @@ export default function App() {
   );
 }
 
+// Карточка быстрого повтора последнего заказа (удержание заказчика).
+function RepeatOrderCard({ order, onPress }: { order: Order; onPress: () => void }) {
+  const service = serviceByKey(order.service);
+  return (
+    <Pressable style={styles.repeatCard} onPress={onPress}>
+      <View style={[styles.repeatIcon, { backgroundColor: tint(service.accent) }]}>
+        <MaterialCommunityIcons name="repeat-variant" size={20} color={service.accent} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.repeatKicker}>Заказать снова</Text>
+        <Text style={styles.repeatSubtitle} numberOfLines={1}>
+          {service.title} · {order.from}
+        </Text>
+      </View>
+      <Text style={styles.repeatPrice}>{rub.format(order.price)} ₽</Text>
+    </Pressable>
+  );
+}
+
 function CreateOrderPanel({
   services,
+  categories,
   selectedService,
   onSelectService,
   service,
@@ -1020,6 +1267,9 @@ function CreateOrderPanel({
   from,
   details,
   price,
+  savedPlaces,
+  onPickPlace,
+  onSavePlace,
   onChangeFrom,
   onSelectSuggestion,
   onChangeDetails,
@@ -1034,6 +1284,7 @@ function CreateOrderPanel({
   geoError
 }: {
   services: Service[];
+  categories: Category[];
   selectedService: ServiceKey;
   onSelectService: (key: ServiceKey) => void;
   service: Service;
@@ -1042,6 +1293,9 @@ function CreateOrderPanel({
   from: string;
   details: string;
   price: string;
+  savedPlaces: SavedPlace[];
+  onPickPlace: (place: SavedPlace) => void;
+  onSavePlace: () => void;
   onChangeFrom: (value: string) => void;
   onSelectSuggestion: (item: GeocodeResult) => void;
   onChangeDetails: (value: string) => void;
@@ -1058,7 +1312,49 @@ function CreateOrderPanel({
   const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [repeatDays, setRepeatDays] = useState(0);
+  const [priceHint, setPriceHint] = useState<{ count: number; min?: number; max?: number } | null>(null);
   const skipNextRef = useRef(false);
+
+  // Подсказка цены по (город × услуга) — обновляется при смене услуги/города.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchPriceHint(cityId, selectedService).then((hint) => {
+      if (!cancelled) {
+        setPriceHint(hint.count >= 3 ? hint : null);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cityId, selectedService]);
+
+  // Группируем услуги по категориям. Показываем вкладки категорий, только если
+  // их больше одной — иначе просто ленту услуг.
+  const catList = useMemo(() => {
+    const present = new Set(services.map((s) => s.category || "other"));
+    const known = categories.filter((c) => present.has(c.key));
+    const extras = [...present].filter((k) => !categories.some((c) => c.key === k));
+    return [...known, ...extras.map((k) => ({ key: k, title: "Прочее" }))];
+  }, [services, categories]);
+
+  const [activeCat, setActiveCat] = useState<string>(
+    () => service.category || catList[0]?.key || "other"
+  );
+  // Если выбранная услуга сменила категорию (напр. через «повторить заказ») —
+  // подтягиваем активную вкладку под неё.
+  useEffect(() => {
+    if (service.category && service.category !== activeCat) {
+      setActiveCat(service.category);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [service.category]);
+
+  const showTabs = catList.length > 1;
+  // Если активная категория отсутствует в этом городе — берём первую доступную.
+  const effectiveCat = catList.some((c) => c.key === activeCat) ? activeCat : catList[0]?.key ?? "other";
+  const visibleServices = showTabs
+    ? services.filter((s) => (s.category || "other") === effectiveCat)
+    : services;
 
   const repeatOptions = [
     { days: 0, label: "Разово" },
@@ -1107,8 +1403,31 @@ function CreateOrderPanel({
         </Text>
       </View>
 
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.serviceRow}>
-        {services.map((item) => {
+      {showTabs ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.categoryRow}
+        >
+          {catList.map((cat) => {
+            const active = cat.key === effectiveCat;
+            return (
+              <Pressable
+                key={cat.key}
+                onPress={() => setActiveCat(cat.key)}
+                style={[styles.categoryTab, active && styles.categoryTabActive]}
+              >
+                <Text style={[styles.categoryTabText, active && styles.categoryTabTextActive]}>
+                  {cat.title}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      ) : null}
+
+      <View style={styles.serviceGrid}>
+        {visibleServices.map((item) => {
           const active = item.key === selectedService;
           return (
             <Pressable
@@ -1121,10 +1440,22 @@ function CreateOrderPanel({
             </Pressable>
           );
         })}
-      </ScrollView>
+      </View>
 
       <View style={ui.inputGroup}>
         <Text style={ui.label}>Адрес</Text>
+        {savedPlaces.length > 0 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.placeRow}>
+            {savedPlaces.map((place) => (
+              <Pressable key={place.id} style={styles.placeChip} onPress={() => onPickPlace(place)}>
+                <MaterialCommunityIcons name="map-marker-outline" size={15} color={colors.ink} />
+                <Text style={styles.placeChipText} numberOfLines={1}>
+                  {place.label}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
         <TextInput
           value={from}
           onChangeText={onChangeFrom}
@@ -1167,9 +1498,15 @@ function CreateOrderPanel({
           </Pressable>
         </View>
         {hasLocation ? (
-          <Pressable onPress={onClearLocation}>
-            <Text style={styles.locationNote}>Сбросить точку</Text>
-          </Pressable>
+          <View style={styles.rowBetween}>
+            <Pressable onPress={onClearLocation}>
+              <Text style={styles.locationNote}>Сбросить точку</Text>
+            </Pressable>
+            <Pressable onPress={onSavePlace} style={styles.savePlaceLink}>
+              <MaterialCommunityIcons name="content-save-outline" size={14} color={colors.ink} />
+              <Text style={styles.savePlaceText}>Сохранить место</Text>
+            </Pressable>
+          </View>
         ) : (
           <Text style={styles.locationNote}>Не укажете — определим по адресу автоматически.</Text>
         )}
@@ -1197,6 +1534,11 @@ function CreateOrderPanel({
           keyboardType="number-pad"
           style={ui.input}
         />
+        {priceHint && priceHint.min && priceHint.max ? (
+          <Text style={styles.locationNote}>
+            Обычно платят {rub.format(priceHint.min)}–{rub.format(priceHint.max)} ₽
+          </Text>
+        ) : null}
       </View>
 
       <View style={ui.inputGroup}>
@@ -1373,6 +1715,180 @@ function OrderCard({
   );
 }
 
+// Публичный профиль исполнителя для заказчика: рейтинг, портфолио, отзывы.
+function ExecutorProfileModal({
+  visible,
+  loading,
+  profile,
+  favorites,
+  onToggleFavorite,
+  onClose
+}: {
+  visible: boolean;
+  loading: boolean;
+  profile: ExecutorProfile | null;
+  favorites: string[];
+  onToggleFavorite: (executorId: string) => void;
+  onClose: () => void;
+}) {
+  const rating = profile?.rating ?? 0;
+  const isFav = Boolean(profile?.id && favorites.includes(profile.id));
+  return (
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalSheet}>
+          <View style={styles.modalHandleRow}>
+            <View style={styles.modalHandle} />
+          </View>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Исполнитель</Text>
+            <Pressable style={styles.modalClose} onPress={onClose}>
+              <MaterialCommunityIcons name="close" size={20} color={colors.ink} />
+            </Pressable>
+          </View>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.modalContent}>
+            {loading || !profile ? (
+              <View style={styles.center}>
+                <ActivityIndicator color={colors.ink} />
+              </View>
+            ) : (
+              <View style={{ gap: 14 }}>
+                <View style={styles.rowCenter}>
+                  <View style={styles.avatar}>
+                    <Text style={styles.avatarText}>{profile.name.slice(0, 1).toUpperCase()}</Text>
+                  </View>
+                  <View style={styles.flex}>
+                    <View style={styles.bidNameRow}>
+                      <Text style={styles.panelTitle}>{profile.name}</Text>
+                      {profile.verified ? (
+                        <MaterialCommunityIcons name="check-decagram" size={16} color="#2E7D5B" />
+                      ) : null}
+                    </View>
+                    <View style={styles.ratingPill}>
+                      <MaterialCommunityIcons name="star" size={15} color="#E0A93B" />
+                      <Text style={styles.ratingText}>
+                        {rating > 0
+                          ? `${rating.toFixed(1)} · ${profile.ratingCount} ${plural(profile.ratingCount ?? 0, "отзыв", "отзыва", "отзывов")}`
+                          : "пока нет отзывов"}
+                      </Text>
+                    </View>
+                  </View>
+                  {profile.id ? (
+                    <Pressable hitSlop={8} onPress={() => onToggleFavorite(profile.id as string)}>
+                      <MaterialCommunityIcons
+                        name={isFav ? "heart" : "heart-outline"}
+                        size={22}
+                        color={isFav ? "#C7503A" : colors.inkFaint}
+                      />
+                    </Pressable>
+                  ) : null}
+                </View>
+
+                <View style={styles.statsRow}>
+                  <Stat icon="briefcase-check-outline" value={String(profile.jobsCompleted ?? 0)} label="выполнено" />
+                  <Stat
+                    icon="star-outline"
+                    value={rating > 0 ? rating.toFixed(1) : "—"}
+                    label="рейтинг"
+                  />
+                </View>
+
+                {profile.services && profile.services.length > 0 ? (
+                  <View style={ui.inputGroup}>
+                    <Text style={ui.label}>Услуги</Text>
+                    <View style={styles.pillWrap}>
+                      {profile.services.map((key) => {
+                        const svc = serviceByKey(key);
+                        return (
+                          <View
+                            key={key}
+                            style={[styles.specChip, { borderColor: svc.accent, backgroundColor: tint(svc.accent) }]}
+                          >
+                            <MaterialCommunityIcons name={svc.icon} size={14} color={svc.accent} />
+                            <Text style={styles.specChipText}>{svc.title}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : null}
+
+                {profile.verificationBadges && profile.verificationBadges.length > 0 ? (
+                  <View style={ui.inputGroup}>
+                    <Text style={ui.label}>Подтверждённые квалификации</Text>
+                    <View style={styles.pillWrap}>
+                      {profile.verificationBadges.map((badge) => {
+                        const svc = serviceByKey(badge.serviceKey);
+                        return (
+                          <View key={`${badge.serviceKey}-${badge.docType}`} style={styles.verifiedBadge}>
+                            <MaterialCommunityIcons name="check-decagram" size={14} color={colors.positive} />
+                            <Text style={styles.verifiedBadgeText}>
+                              {svc.title} · {badge.docType}
+                            </Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ) : null}
+
+                {profile.bio ? (
+                  <View style={ui.inputGroup}>
+                    <Text style={ui.label}>О себе</Text>
+                    <Text style={styles.details}>{profile.bio}</Text>
+                  </View>
+                ) : null}
+
+                {profile.portfolio && profile.portfolio.length > 0 ? (
+                  <View style={ui.inputGroup}>
+                    <Text style={ui.label}>Примеры работ</Text>
+                    {profile.portfolio.map((item) => (
+                      <View key={item.id} style={styles.portfolioItem}>
+                        <View style={styles.flex}>
+                          <Text style={styles.portfolioTitle}>{item.title}</Text>
+                          {item.description ? (
+                            <Text style={styles.panelSubtitle}>{item.description}</Text>
+                          ) : null}
+                          {item.photoUrl ? (
+                            item.photoUrl.startsWith("data:") ? (
+                              <Image source={{ uri: item.photoUrl }} style={styles.portfolioPhoto} resizeMode="cover" />
+                            ) : (
+                              <Text style={styles.portfolioLink} numberOfLines={1}>
+                                {item.photoUrl}
+                              </Text>
+                            )
+                          ) : null}
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+
+                {profile.reviews && profile.reviews.length > 0 ? (
+                  <View style={ui.inputGroup}>
+                    <Text style={ui.label}>Отзывы</Text>
+                    {profile.reviews.map((rev) => (
+                      <View key={rev.id} style={styles.portfolioItem}>
+                        <View style={styles.flex}>
+                          <View style={styles.rowBetween}>
+                            <Text style={styles.portfolioTitle}>{rev.author}</Text>
+                            <Text style={styles.ratingText}>★ {rev.rating}</Text>
+                          </View>
+                          {rev.text ? <Text style={styles.panelSubtitle}>{rev.text}</Text> : null}
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function OrderDetails({
   order,
   role,
@@ -1389,7 +1905,8 @@ function OrderDetails({
   onFinish,
   onConfirm,
   onReview,
-  onRepeat
+  onRepeat,
+  onOpenExecutor
 }: {
   order: Order;
   role: Role;
@@ -1407,15 +1924,46 @@ function OrderDetails({
   onConfirm: () => void;
   onReview: (rating: number, text: string) => void;
   onRepeat: () => void;
+  onOpenExecutor: (executorId: string) => void;
 }) {
   const service = serviceByKey(order.service);
-  const [bidPrice, setBidPrice] = useState("");
+  // По умолчанию подставляем цену заказчика — исполнитель может изменить.
+  const [bidPrice, setBidPrice] = useState(String(order.price));
   const [bidEta, setBidEta] = useState("40 мин");
   const [stars, setStars] = useState(5);
   const [reviewText, setReviewText] = useState("");
+  const [reach, setReach] = useState<number | null>(null);
+
+  // Охват: сколько исполнителей поблизости видят открытый заказ (для заказчика).
+  useEffect(() => {
+    if (role !== "client" || order.status !== "open") {
+      return;
+    }
+    let cancelled = false;
+    void fetchReach(order.id).then((r) => {
+      if (!cancelled) setReach(r.reach);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [order.id, order.status, role]);
 
   const alreadyBid = order.bids.some((bid) => bid.driverId === accountId);
   const canBid = role === "driver" && order.status === "open" && !alreadyBid;
+
+  // Ранжируем отклики «кто лучше»: подтверждённая профессия → рейтинг →
+  // число выполненных → цена. Лучший помечается бейджем.
+  const rankedBids = useMemo(() => {
+    return [...order.bids].sort((a, b) => {
+      const av = a.verifiedService ? 1 : 0;
+      const bv = b.verifiedService ? 1 : 0;
+      if (bv !== av) return bv - av;
+      if ((b.rating || 0) !== (a.rating || 0)) return (b.rating || 0) - (a.rating || 0);
+      if ((b.jobsCompleted || 0) !== (a.jobsCompleted || 0)) return (b.jobsCompleted || 0) - (a.jobsCompleted || 0);
+      return (a.price || 0) - (b.price || 0);
+    });
+  }, [order.bids]);
+  const bestBidId = order.bids.length >= 2 ? rankedBids[0]?.id ?? null : null;
 
   function submitBid() {
     const numeric = Number(bidPrice.replace(/\D/g, ""));
@@ -1447,7 +1995,10 @@ function OrderDetails({
 
       {/* Контакты второй стороны после подтверждения */}
       {order.status !== "open" && role === "client" && order.executor ? (
-        <ContactCard title="Исполнитель" person={order.executor} />
+        <Pressable onPress={() => onOpenExecutor(order.executor?.id ?? "")}>
+          <ContactCard title="Исполнитель" person={order.executor} />
+          <Text style={styles.locationNote}>Нажмите, чтобы открыть профиль и портфолио</Text>
+        </Pressable>
       ) : null}
       {order.status !== "open" && role === "driver" && order.customer ? (
         <ContactCard title="Заказчик" person={order.customer} />
@@ -1480,7 +2031,12 @@ function OrderDetails({
             />
           </View>
           {bidFee > 0 ? (
-            <Text style={styles.locationNote}>Отклик платный: {bidFee} ₽ спишется с баланса.</Text>
+            <View style={styles.bidFeeRow}>
+              <CoinIcon size={15} />
+              <Text style={styles.locationNote}>
+                Платный отклик: спишется {bidFee} мон. (≈ {coinsToRub(bidFee)} ₽) с баланса.
+              </Text>
+            </View>
           ) : null}
           {bidError ? <Text style={ui.errorText}>{bidError}</Text> : null}
           <Pressable style={ui.primaryButton} onPress={submitBid}>
@@ -1497,6 +2053,21 @@ function OrderDetails({
         </View>
       ) : null}
 
+      {/* Заказчик: живой статус ожидания откликов */}
+      {role === "client" && order.status === "open" ? (
+        <View style={styles.reachBanner}>
+          <MaterialCommunityIcons name="account-search-outline" size={18} color={colors.inkSoft} />
+          <Text style={styles.reachText}>
+            {reach === null
+              ? "Ищем исполнителей поблизости…"
+              : reach === 0
+              ? "Ищем подходящих исполнителей в вашем городе"
+              : `Ваш заказ видят ${reach} ${plural(reach, "исполнитель", "исполнителя", "исполнителей")} поблизости`}
+            {order.bids.length > 0 ? ` · уже ${order.bids.length} ${plural(order.bids.length, "отклик", "отклика", "откликов")}` : ""}
+          </Text>
+        </View>
+      ) : null}
+
       {/* Заказчик: отклики и выбор */}
       {role === "client" && order.status === "open" ? (
         <View style={styles.bidsList}>
@@ -1504,39 +2075,64 @@ function OrderDetails({
           {order.bids.length === 0 ? (
             <Text style={styles.empty}>Пока нет откликов</Text>
           ) : (
-            order.bids.map((bid) => (
-              <View key={bid.id} style={styles.bidCard}>
-                <Pressable hitSlop={6} onPress={() => onToggleFavorite(bid.driverId ?? "")}>
-                  <MaterialCommunityIcons
-                    name={bid.driverId && favorites.includes(bid.driverId) ? "heart" : "heart-outline"}
-                    size={20}
-                    color={bid.driverId && favorites.includes(bid.driverId) ? "#C7503A" : colors.inkFaint}
-                  />
-                </Pressable>
-                <View style={styles.flex}>
-                  <View style={styles.bidNameRow}>
-                    <Text style={styles.bidDriver}>{bid.driver}</Text>
-                    {bid.verified ? (
-                      <MaterialCommunityIcons name="check-decagram" size={15} color="#2E7D5B" />
-                    ) : null}
+            rankedBids.map((bid) => {
+              const isBest = bid.id === bestBidId;
+              const jobs = bid.jobsCompleted ?? 0;
+              return (
+                <View key={bid.id} style={[styles.bidCard, isBest && styles.bidCardBest]}>
+                  <Pressable hitSlop={6} onPress={() => onToggleFavorite(bid.driverId ?? "")}>
+                    <MaterialCommunityIcons
+                      name={bid.driverId && favorites.includes(bid.driverId) ? "heart" : "heart-outline"}
+                      size={20}
+                      color={bid.driverId && favorites.includes(bid.driverId) ? "#C7503A" : colors.inkFaint}
+                    />
+                  </Pressable>
+                  <Pressable style={styles.flex} onPress={() => onOpenExecutor(bid.driverId ?? "")}>
+                    <View style={styles.bidNameRow}>
+                      {isBest ? (
+                        <View style={styles.bestBadge}>
+                          <MaterialCommunityIcons name="trophy-variant" size={11} color={colors.accentText} />
+                          <Text style={styles.bestBadgeText}>лучший</Text>
+                        </View>
+                      ) : null}
+                      <Text style={[styles.bidDriver, styles.bidDriverLink]}>{bid.driver}</Text>
+                      {bid.verifiedService ? (
+                        <MaterialCommunityIcons name="check-decagram" size={15} color={colors.positive} />
+                      ) : null}
+                      <MaterialCommunityIcons name="chevron-right" size={16} color={colors.inkFaint} />
+                    </View>
+                    <View style={styles.bidStatsRow}>
+                      <View style={styles.bidStat}>
+                        <MaterialCommunityIcons name="star" size={13} color="#E0A93B" />
+                        <Text style={styles.bidStatText}>
+                          {bid.rating ? bid.rating.toFixed(1) : "—"}
+                          {bid.ratingCount ? ` (${bid.ratingCount})` : ""}
+                        </Text>
+                      </View>
+                      <View style={styles.bidStat}>
+                        <MaterialCommunityIcons name="briefcase-check-outline" size={13} color={colors.inkSoft} />
+                        <Text style={styles.bidStatText}>{jobs}</Text>
+                      </View>
+                      {bid.verifiedService ? (
+                        <Text style={styles.bidVerifText}>профессия ✓</Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.bidMeta}>{bid.eta} · открыть профиль</Text>
+                  </Pressable>
+                  <View style={styles.bidSide}>
+                    <Text style={styles.bidPrice}>{rub.format(bid.price)} ₽</Text>
+                    <View style={styles.bidActions}>
+                      <Pressable style={styles.rejectButton} onPress={() => onRejectBid(bid.id)}>
+                        <Text style={styles.rejectButtonText}>Отклонить</Text>
+                      </Pressable>
+                      <Pressable style={styles.acceptButton} onPress={() => onAcceptBid(bid.id)}>
+                        <Text style={styles.acceptButtonText}>Выбрать</Text>
+                      </Pressable>
+                    </View>
                   </View>
-                  <Text style={styles.bidMeta}>
-                    {bid.eta} · ★ {bid.rating ? bid.rating.toFixed(1) : "—"}
-                  </Text>
                 </View>
-                <View style={styles.bidSide}>
-                  <Text style={styles.bidPrice}>{rub.format(bid.price)} ₽</Text>
-                  <View style={styles.bidActions}>
-                    <Pressable style={styles.rejectButton} onPress={() => onRejectBid(bid.id)}>
-                      <Text style={styles.rejectButtonText}>Отклонить</Text>
-                    </Pressable>
-                    <Pressable style={styles.acceptButton} onPress={() => onAcceptBid(bid.id)}>
-                      <Text style={styles.acceptButtonText}>Выбрать</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              </View>
-            ))
+              );
+            })
           )}
         </View>
       ) : null}
@@ -1676,6 +2272,340 @@ function StarPicker({ value, onChange }: { value: number; onChange: (n: number) 
   );
 }
 
+// Кнопка выбора фото из галереи → base64 data-URL (для портфолио и верификации).
+function PhotoPicker({
+  value,
+  onChange,
+  label
+}: {
+  value: string | null;
+  onChange: (dataUrl: string | null) => void;
+  label: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function pick() {
+    setBusy(true);
+    setErr("");
+    const result = await pickImageAsBase64();
+    setBusy(false);
+    if (result.ok) {
+      onChange(result.dataUrl);
+    } else if (result.error) {
+      setErr(result.error);
+    }
+  }
+
+  return (
+    <View style={ui.inputGroup}>
+      <Text style={ui.label}>{label}</Text>
+      {value ? (
+        <View style={{ gap: 8 }}>
+          <Image source={{ uri: value }} style={styles.photoPreview} resizeMode="cover" />
+          <Pressable onPress={() => onChange(null)}>
+            <Text style={styles.locationNote}>Убрать фото</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Pressable style={ui.ghostButton} onPress={pick} disabled={busy}>
+          <MaterialCommunityIcons name="camera-plus-outline" size={18} color={colors.ink} />
+          <Text style={ui.ghostButtonText}>{busy ? "Загрузка…" : "Прикрепить фото"}</Text>
+        </Pressable>
+      )}
+      {err ? <Text style={ui.errorText}>{err}</Text> : null}
+    </View>
+  );
+}
+
+// Редактор портфолио исполнителя: описание (био) + примеры работ.
+function PortfolioEditor({ account }: { account: Account }) {
+  const [bio, setBio] = useState(account.bio ?? "");
+  const [items, setItems] = useState<PortfolioItem[]>([]);
+  const [title, setTitle] = useState("");
+  const [desc, setDesc] = useState("");
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Подгружаем текущее портфолио с сервера.
+  useEffect(() => {
+    let cancelled = false;
+    if (!account.id) {
+      return;
+    }
+    (async () => {
+      try {
+        const profile = await fetchExecutorProfile(account.id as string);
+        if (!cancelled) {
+          setBio(profile.bio ?? "");
+          setItems(profile.portfolio ?? []);
+        }
+      } catch {
+        // офлайн — оставляем пусто
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [account.id]);
+
+  async function saveBio() {
+    setError("");
+    setBusy(true);
+    try {
+      const profile = await updatePortfolio({ bio });
+      setItems(profile.portfolio ?? []);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Не удалось сохранить. Проверьте связь.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addItem() {
+    if (!title.trim()) {
+      return;
+    }
+    setError("");
+    setBusy(true);
+    try {
+      const profile = await updatePortfolio({
+        addItem: { title: title.trim(), description: desc.trim(), photoUrl: photo ?? "" }
+      });
+      setItems(profile.portfolio ?? []);
+      setTitle("");
+      setDesc("");
+      setPhoto(null);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Не удалось добавить работу.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeItem(id: string) {
+    setBusy(true);
+    try {
+      const profile = await updatePortfolio({ deleteItemId: id });
+      setItems(profile.portfolio ?? []);
+    } catch {
+      // молча — можно повторить
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Портфолио</Text>
+      <Text style={styles.panelSubtitle}>Заказчики видят его при выборе исполнителя.</Text>
+
+      <View style={ui.inputGroup}>
+        <Text style={ui.label}>О себе</Text>
+        <TextInput
+          value={bio}
+          onChangeText={setBio}
+          placeholder="Опыт, техника, район работы…"
+          placeholderTextColor={colors.inkFaint}
+          multiline
+          maxLength={600}
+          style={[ui.input, ui.textArea]}
+        />
+        <Pressable style={ui.ghostButton} onPress={saveBio} disabled={busy}>
+          <MaterialCommunityIcons name="content-save-outline" size={18} color={colors.ink} />
+          <Text style={ui.ghostButtonText}>Сохранить описание</Text>
+        </Pressable>
+      </View>
+
+      <View style={ui.inputGroup}>
+        <Text style={ui.label}>Примеры работ ({items.length})</Text>
+        {items.length === 0 ? (
+          <Text style={styles.locationNote}>Пока нет работ. Добавьте первую ниже.</Text>
+        ) : (
+          items.map((item) => (
+            <View key={item.id} style={styles.portfolioItem}>
+              <View style={styles.flex}>
+                <Text style={styles.portfolioTitle}>{item.title}</Text>
+                {item.description ? (
+                  <Text style={styles.panelSubtitle}>{item.description}</Text>
+                ) : null}
+                {item.photoUrl ? (
+                  item.photoUrl.startsWith("data:") ? (
+                    <Image source={{ uri: item.photoUrl }} style={styles.portfolioPhoto} resizeMode="cover" />
+                  ) : (
+                    <Text style={styles.portfolioLink} numberOfLines={1}>
+                      {item.photoUrl}
+                    </Text>
+                  )
+                ) : null}
+              </View>
+              <Pressable hitSlop={8} onPress={() => removeItem(item.id)}>
+                <MaterialCommunityIcons name="close-circle-outline" size={22} color={colors.warning} />
+              </Pressable>
+            </View>
+          ))
+        )}
+      </View>
+
+      <View style={ui.inputGroup}>
+        <Text style={ui.label}>Добавить работу</Text>
+        <TextInput
+          value={title}
+          onChangeText={setTitle}
+          placeholder="Название (напр. «Монтаж насоса»)"
+          placeholderTextColor={colors.inkFaint}
+          maxLength={120}
+          style={ui.input}
+        />
+        <TextInput
+          value={desc}
+          onChangeText={setDesc}
+          placeholder="Короткое описание"
+          placeholderTextColor={colors.inkFaint}
+          multiline
+          maxLength={600}
+          style={[ui.input, ui.textArea]}
+        />
+        <PhotoPicker label="Фото работы (необязательно)" value={photo} onChange={setPhoto} />
+        {error ? <Text style={ui.errorText}>{error}</Text> : null}
+        <Pressable style={ui.primaryButton} onPress={addItem} disabled={busy}>
+          <MaterialCommunityIcons name="plus" size={18} color={colors.accentText} />
+          <Text style={ui.primaryButtonText}>Добавить работу</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+const DOC_TYPES = [
+  "Удостоверение НАКС",
+  "Лицензия",
+  "Диплом / свидетельство",
+  "Сертификат",
+  "Удостоверение",
+  "Договор ИП / ООО"
+];
+
+const verifStatusLabel = (s: string) =>
+  s === "verified" ? "подтверждено ✓" : s === "rejected" ? "отклонено" : "на проверке";
+
+// Верификация квалификации по документу (напр. сварщик → НАКС).
+function VerificationCard({ account, catalog }: { account: Account; catalog: Catalog }) {
+  const [requests, setRequests] = useState<VerificationRequest[]>([]);
+  const [service, setService] = useState<ServiceKey | null>(null);
+  const [docType, setDocType] = useState("");
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchMyVerifications()
+      .then((list) => {
+        if (!cancelled) setRequests(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const myServices = catalog.services.filter((s) => (account.services ?? []).includes(s.key));
+  const choices = myServices.length > 0 ? myServices : catalog.services;
+
+  async function submit() {
+    if (!service || !docType || !photo) {
+      setError("Выберите услугу, тип документа и приложите фото");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await createVerificationRequest({ serviceKey: service, docType, photo });
+      setRequests(await fetchMyVerifications());
+      setService(null);
+      setDocType("");
+      setPhoto(null);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Не удалось отправить заявку");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Верификация квалификации</Text>
+      <Text style={styles.panelSubtitle}>
+        Подтвердите документом — заказчики увидят значок по услуге (напр. сварщик · НАКС).
+      </Text>
+
+      {requests.length > 0 ? (
+        <View style={{ gap: 6 }}>
+          {requests.map((r) => {
+            const svc = serviceByKey(r.serviceKey);
+            return (
+              <View key={r.id} style={styles.verifRow}>
+                <MaterialCommunityIcons
+                  name={r.status === "verified" ? "check-decagram" : r.status === "rejected" ? "close-circle-outline" : "progress-clock"}
+                  size={16}
+                  color={r.status === "verified" ? colors.positive : r.status === "rejected" ? colors.warning : colors.inkSoft}
+                />
+                <Text style={styles.verifRowText}>
+                  {svc.title} · {r.docType} — {verifStatusLabel(r.status)}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
+
+      <View style={ui.inputGroup}>
+        <Text style={ui.label}>Услуга</Text>
+        <View style={styles.pillWrap}>
+          {choices.map((s) => {
+            const on = service === s.key;
+            return (
+              <Pressable
+                key={s.key}
+                onPress={() => setService(s.key)}
+                style={[styles.specChip, on && { borderColor: s.accent, backgroundColor: tint(s.accent) }]}
+              >
+                <MaterialCommunityIcons name={on ? "check" : s.icon} size={16} color={on ? s.accent : colors.inkSoft} />
+                <Text style={styles.specChipText}>{s.title}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+
+      <View style={ui.inputGroup}>
+        <Text style={ui.label}>Тип документа</Text>
+        <View style={styles.pillWrap}>
+          {DOC_TYPES.map((d) => (
+            <Pressable
+              key={d}
+              onPress={() => setDocType(d)}
+              style={[ui.pill, docType === d && ui.pillActive]}
+            >
+              <Text style={[ui.pillText, docType === d && ui.pillTextActive]}>{d}</Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
+      <PhotoPicker label="Фото документа" value={photo} onChange={setPhoto} />
+
+      {error ? <Text style={ui.errorText}>{error}</Text> : null}
+      <Pressable style={ui.primaryButton} onPress={submit} disabled={busy}>
+        <MaterialCommunityIcons name="shield-check-outline" size={18} color={colors.accentText} />
+        <Text style={ui.primaryButtonText}>{busy ? "Отправка…" : "Отправить на проверку"}</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 function ProfilePanel({
   account,
   catalog,
@@ -1688,6 +2618,8 @@ function ProfilePanel({
   onSaveConfig,
   onVerify,
   onLogout,
+  savedPlaces,
+  onDeletePlace,
   onBalanceChange
 }: {
   account: Account;
@@ -1697,19 +2629,24 @@ function ProfilePanel({
   bidFee: number;
   bidPercent: number;
   onToggleDev: (value: boolean) => void;
-  onSave: (next: {
-    name: string;
-    role: Role;
-    cityId: string;
-    phone: string;
-    telegram: string;
-    services: ServiceKey[];
-    radiusKm: number;
-    available: boolean;
-  }) => void;
+  onSave: (
+    next: {
+      name: string;
+      role: Role;
+      cityId: string;
+      phone: string;
+      telegram: string;
+      services: ServiceKey[];
+      radiusKm: number;
+      available: boolean;
+    },
+    onError?: (message: string) => void
+  ) => void;
   onSaveConfig: (fee: number, percent: number) => void;
   onVerify: () => void;
   onLogout: () => void;
+  savedPlaces: SavedPlace[];
+  onDeletePlace: (id: string) => void;
   onBalanceChange: (balance: number) => void;
 }) {
   const [name, setName] = useState(account.name);
@@ -1723,6 +2660,7 @@ function ProfilePanel({
   const [cityPickerOpen, setCityPickerOpen] = useState(false);
   const [feeInput, setFeeInput] = useState(String(bidFee));
   const [percentInput, setPercentInput] = useState(String(bidPercent));
+  const [saveError, setSaveError] = useState("");
 
   const city = catalog.cities.find((c) => c.id === cityId);
   const rating = account.rating ?? 0;
@@ -1732,6 +2670,20 @@ function ProfilePanel({
       current.includes(key) ? current.filter((k) => k !== key) : [...current, key]
     );
   }
+
+  // Услуги, сгруппированные по категориям (для выбора специализаций исполнителя).
+  const servicesByCategory = useMemo(() => {
+    const cats = catalog.categories ?? [];
+    const groups = cats
+      .map((c) => ({ title: c.title, items: catalog.services.filter((s) => (s.category || "other") === c.key) }))
+      .filter((g) => g.items.length > 0);
+    const grouped = new Set(groups.flatMap((g) => g.items.map((s) => s.key)));
+    const rest = catalog.services.filter((s) => !grouped.has(s.key));
+    if (rest.length) {
+      groups.push({ title: "Прочее", items: rest });
+    }
+    return groups;
+  }, [catalog.services, catalog.categories]);
 
   return (
     <View style={styles.profileWrap}>
@@ -1826,25 +2778,30 @@ function ProfilePanel({
         {role === "driver" ? (
           <View style={ui.inputGroup}>
             <Text style={ui.label}>Мои услуги (что выполняю)</Text>
-            <View style={styles.pillWrap}>
-              {catalog.services.map((s) => {
-                const on = services.includes(s.key);
-                return (
-                  <Pressable
-                    key={s.key}
-                    onPress={() => toggleService(s.key)}
-                    style={[styles.specChip, on && { borderColor: s.accent, backgroundColor: tint(s.accent) }]}
-                  >
-                    <MaterialCommunityIcons
-                      name={on ? "check" : s.icon}
-                      size={16}
-                      color={on ? s.accent : colors.inkSoft}
-                    />
-                    <Text style={styles.specChipText}>{s.title}</Text>
-                  </Pressable>
-                );
-              })}
-            </View>
+            {servicesByCategory.map((group) => (
+              <View key={group.title} style={{ gap: 6 }}>
+                <Text style={styles.specGroupTitle}>{group.title}</Text>
+                <View style={styles.pillWrap}>
+                  {group.items.map((s) => {
+                    const on = services.includes(s.key);
+                    return (
+                      <Pressable
+                        key={s.key}
+                        onPress={() => toggleService(s.key)}
+                        style={[styles.specChip, on && { borderColor: s.accent, backgroundColor: tint(s.accent) }]}
+                      >
+                        <MaterialCommunityIcons
+                          name={on ? "check" : s.icon}
+                          size={16}
+                          color={on ? s.accent : colors.inkSoft}
+                        />
+                        <Text style={styles.specChipText}>{s.title}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
+            ))}
             <Text style={styles.locationNote}>Биржа покажет только заказы по выбранным услугам.</Text>
           </View>
         ) : null}
@@ -1875,49 +2832,66 @@ function ProfilePanel({
               />
             </View>
 
-            <View style={ui.inputGroup}>
-              <Text style={ui.label}>Верификация</Text>
-              {account.verified ? (
-                <View style={styles.verifiedRow}>
-                  <MaterialCommunityIcons name="check-decagram" size={18} color="#2E7D5B" />
-                  <Text style={styles.verifiedText}>Аккаунт проверен — заказчики видят значок.</Text>
-                </View>
-              ) : account.verifyStatus === "pending" ? (
-                <View style={styles.verifiedRow}>
-                  <MaterialCommunityIcons name="progress-clock" size={18} color={colors.inkSoft} />
-                  <Text style={styles.verifiedText}>Заявка на проверке у модератора.</Text>
-                </View>
-              ) : (
-                <Pressable style={ui.ghostButton} onPress={onVerify}>
-                  <MaterialCommunityIcons name="shield-check-outline" size={18} color={colors.ink} />
-                  <Text style={ui.ghostButtonText}>
-                    {account.verifyStatus === "rejected" ? "Отклонено — подать снова" : "Пройти верификацию"}
-                  </Text>
-                </Pressable>
-              )}
-            </View>
+            {/* Верификация квалификации по документу — в отдельной карточке ниже. */}
           </>
         ) : null}
 
+        {saveError ? <Text style={ui.errorText}>{saveError}</Text> : null}
         <Pressable
           style={ui.primaryButton}
-          onPress={() =>
-            onSave({
-              name,
-              role,
-              cityId,
-              phone,
-              telegram,
-              services,
-              radiusKm: Math.max(0, Math.round(Number(radiusInput) || 0)),
-              available
-            })
-          }
+          onPress={() => {
+            setSaveError("");
+            onSave(
+              {
+                name,
+                role,
+                cityId,
+                phone,
+                telegram,
+                services,
+                radiusKm: Math.max(0, Math.round(Number(radiusInput) || 0)),
+                available
+              },
+              (message) => setSaveError(message)
+            );
+          }}
         >
           <MaterialCommunityIcons name="check" size={18} color={colors.accentText} />
           <Text style={ui.primaryButtonText}>Сохранить</Text>
         </Pressable>
       </View>
+
+      {role === "client" ? (
+        <View style={ui.card}>
+          <Text style={styles.panelTitle}>Мои места</Text>
+          {savedPlaces.length === 0 ? (
+            <Text style={styles.panelSubtitle}>
+              Нет сохранённых мест. Укажите точку при создании заявки и нажмите «Сохранить место».
+            </Text>
+          ) : (
+            savedPlaces.map((place) => (
+              <View key={place.id} style={styles.placeManageRow}>
+                <MaterialCommunityIcons name="map-marker-outline" size={18} color={colors.ink} />
+                <View style={styles.flex}>
+                  <Text style={styles.portfolioTitle}>{place.label}</Text>
+                  <Text style={styles.panelSubtitle} numberOfLines={1}>
+                    {place.fromText}
+                  </Text>
+                </View>
+                <Pressable hitSlop={8} onPress={() => onDeletePlace(place.id)}>
+                  <MaterialCommunityIcons name="close-circle-outline" size={20} color={colors.warning} />
+                </Pressable>
+              </View>
+            ))
+          )}
+        </View>
+      ) : null}
+
+      {role === "driver" ? <VerificationCard account={account} catalog={catalog} /> : null}
+
+      {role === "driver" ? (
+        <PortfolioEditor account={account} />
+      ) : null}
 
       {role === "driver" ? (
         <WalletCard account={account} bidFee={bidFee} onBalanceChange={onBalanceChange} />
@@ -1941,10 +2915,13 @@ function ProfilePanel({
 
         {devMode ? (
           <View style={styles.divBlock}>
-            <Text style={ui.label}>Монетизация (dev)</Text>
+            <Text style={ui.label}>Глобальный тариф (fallback)</Text>
+            <Text style={styles.locationNote}>
+              Применяется, если для ниши не задана своя цена. Точечные цены — в админке.
+            </Text>
             <View style={styles.bidRow}>
               <View style={styles.flex}>
-                <Text style={styles.locationNote}>Цена отклика, ₽</Text>
+                <Text style={styles.locationNote}>Цена отклика, монеты</Text>
                 <TextInput
                   value={feeInput}
                   onChangeText={setFeeInput}
@@ -1964,7 +2941,7 @@ function ProfilePanel({
             </View>
             <Text style={styles.locationNote}>
               Пример: при заказе 4000 ₽ отклик = {Math.max(0, Math.round(Number(feeInput) || 0)) +
-                Math.round((4000 * (Number(percentInput) || 0)) / 100)} ₽. 0/0 — бесплатно.
+                Math.round((4000 * (Number(percentInput) || 0)) / 100)} монет. 0/0 — бесплатно.
             </Text>
             <Pressable
               style={ui.ghostButton}
@@ -2073,73 +3050,943 @@ function CityPicker({
   );
 }
 
-function AdminScreen() {
-  const [pending, setPending] = useState<Account[]>([]);
-  const [users, setUsers] = useState<Account[]>([]);
+// Строка сетки цен: локальная стоимость + переключатель платности ниши.
+function PricingRow({
+  cell,
+  onSave
+}: {
+  cell: PricingCell;
+  onSave: (coinCost: number, enabled: boolean) => void;
+}) {
+  const [cost, setCost] = useState(cell.coinCost ? String(cell.coinCost) : "");
+  const [enabled, setEnabled] = useState(cell.enabled);
 
-  const load = useCallback(async () => {
+  function commit(nextEnabled: boolean) {
+    const parsed = Math.max(0, Math.round(Number(cost) || 0));
+    const finalCost = nextEnabled && parsed === 0 ? 20 : parsed;
+    setCost(finalCost ? String(finalCost) : "");
+    setEnabled(nextEnabled);
+    onSave(finalCost, nextEnabled);
+  }
+
+  return (
+    <View style={styles.pricingRow}>
+      <Text style={styles.pricingService} numberOfLines={1}>
+        {cell.serviceName}
+      </Text>
+      <TextInput
+        value={cost}
+        onChangeText={setCost}
+        onEndEditing={() => commit(enabled)}
+        keyboardType="number-pad"
+        placeholder="0"
+        placeholderTextColor={colors.inkFaint}
+        style={styles.pricingInput}
+      />
+      <Text style={styles.pricingUnit}>мон.</Text>
+      <Switch
+        value={enabled}
+        onValueChange={commit}
+        trackColor={{ true: colors.ink, false: colors.line }}
+        thumbColor={colors.surface}
+      />
+    </View>
+  );
+}
+
+// Админ: включение платных ниш (город × услуга) по монетам.
+// KPI-карточка для дашборда (2 в ряд).
+function MetricCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <View style={styles.metricCard}>
+      <Text style={styles.metricValue} numberOfLines={1}>
+        {value}
+      </Text>
+      <Text style={styles.metricLabel}>{label}</Text>
+      {sub ? <Text style={styles.metricSub} numberOfLines={1}>{sub}</Text> : null}
+    </View>
+  );
+}
+
+// Платные ниши: выбор города → правим только его ниши (масштаб на 20+ городов).
+function AdminPricingPanel({ cities }: { cities: City[] }) {
+  const [grid, setGrid] = useState<PricingCell[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [cityId, setCityId] = useState(cities[0]?.id ?? "");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [bulkService, setBulkService] = useState<ServiceKey | null>(null);
+  const [bulkCost, setBulkCost] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPricingGrid()
+      .then((data) => {
+        if (!cancelled) setGrid(data.grid);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const cityCells = useMemo(() => grid.filter((c) => c.cityId === cityId), [grid, cityId]);
+  const enabledCount = useMemo(() => grid.filter((c) => c.enabled).length, [grid]);
+  const cityName = cities.find((c) => c.id === cityId)?.name ?? "Выбрать город";
+  const allServices = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const c of grid) if (!seen.has(c.serviceKey)) seen.set(c.serviceKey, c.serviceName);
+    return [...seen.entries()].map(([key, name]) => ({ key, name }));
+  }, [grid]);
+
+  async function save(cell: PricingCell, coinCost: number, enabled: boolean) {
+    setGrid((g) =>
+      g.map((c) =>
+        c.cityId === cell.cityId && c.serviceKey === cell.serviceKey ? { ...c, coinCost, enabled } : c
+      )
+    );
     try {
-      const [p, u] = await Promise.all([fetchPendingVerifications(), fetchUsers()]);
-      setPending(p);
-      setUsers(u);
+      await setPricingRuleOnServer({ cityId: cell.cityId, serviceKey: cell.serviceKey, coinCost, enabled });
     } catch {
-      // нет прав / сеть
+      // тихо — можно повторить
+    }
+  }
+
+  async function bulkApply(rules: { cityId: string; serviceKey: ServiceKey; coinCost: number; enabled: boolean }[]) {
+    if (rules.length === 0) return;
+    setBusy(true);
+    try {
+      await updatePricingBulk(rules);
+      const map = new Map(rules.map((r) => [`${r.cityId}|${r.serviceKey}`, r]));
+      setGrid((g) =>
+        g.map((c) => {
+          const r = map.get(`${c.cityId}|${c.serviceKey}`);
+          return r ? { ...c, coinCost: r.coinCost, enabled: r.enabled } : c;
+        })
+      );
+    } catch {
+      // тихо
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function applyServiceToAll() {
+    const cost = Math.max(0, Math.round(Number(bulkCost) || 0));
+    if (!bulkService || cost <= 0) return;
+    void bulkApply(
+      grid
+        .filter((c) => c.serviceKey === bulkService)
+        .map((c) => ({ cityId: c.cityId, serviceKey: c.serviceKey, coinCost: cost, enabled: true }))
+    );
+    setBulkService(null);
+    setBulkCost("");
+  }
+
+  function copyFrom(sourceCityId: string) {
+    void bulkApply(
+      grid
+        .filter((c) => c.cityId === sourceCityId)
+        .map((c) => ({ cityId, serviceKey: c.serviceKey, coinCost: c.coinCost, enabled: c.enabled }))
+    );
+  }
+
+  return (
+    <View style={ui.card}>
+      <View style={styles.balanceRow}>
+        <CoinIcon size={18} />
+        <Text style={styles.panelTitle}>Платные ниши</Text>
+      </View>
+      <Text style={styles.panelSubtitle}>
+        Плата за отклик по нишам. Включено ниш: {enabledCount}. 1 монета = {COIN_RATE} ₽.
+      </Text>
+      <Pressable style={styles.selectButton} onPress={() => setPickerOpen(true)}>
+        <MaterialCommunityIcons name="map-marker-outline" size={18} color={colors.ink} />
+        <Text style={styles.selectButtonText}>{cityName}</Text>
+        <MaterialCommunityIcons name="chevron-down" size={18} color={colors.inkFaint} />
+      </Pressable>
+
+      <View style={styles.divBlock}>
+        <Text style={ui.label}>Массовые действия</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.placeRow}>
+          {allServices.map((s) => (
+            <Pressable
+              key={s.key}
+              onPress={() => setBulkService(bulkService === s.key ? null : s.key)}
+              style={[styles.placeChip, bulkService === s.key && { borderColor: colors.ink, backgroundColor: colors.surfaceMuted }]}
+            >
+              <Text style={styles.placeChipText}>{s.name}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+        <View style={styles.rowGap}>
+          <TextInput
+            value={bulkCost}
+            onChangeText={setBulkCost}
+            placeholder="цена, мон."
+            placeholderTextColor={colors.inkFaint}
+            keyboardType="number-pad"
+            style={[ui.input, styles.flex]}
+          />
+          <Pressable
+            style={[ui.primaryButton, styles.flex, (!bulkService || !bulkCost.trim() || busy) && { opacity: 0.5 }]}
+            onPress={applyServiceToAll}
+            disabled={!bulkService || !bulkCost.trim() || busy}
+          >
+            <Text style={ui.primaryButtonText}>Во все города</Text>
+          </Pressable>
+        </View>
+        <View style={styles.rowGap}>
+          <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => setCopyOpen(true)} disabled={busy}>
+            <MaterialCommunityIcons name="content-copy" size={16} color={colors.ink} />
+            <Text style={ui.ghostButtonText}>Скопировать из города</Text>
+          </Pressable>
+          <Pressable
+            style={ui.ghostButton}
+            onPress={() =>
+              bulkApply(cityCells.map((c) => ({ cityId: c.cityId, serviceKey: c.serviceKey, coinCost: 0, enabled: false })))
+            }
+            disabled={busy}
+          >
+            <Text style={[ui.ghostButtonText, { color: colors.warning }]}>Выключить всё</Text>
+          </Pressable>
+        </View>
+      </View>
+
+      {loading ? (
+        <ActivityIndicator color={colors.ink} />
+      ) : cityCells.length === 0 ? (
+        <Text style={styles.panelSubtitle}>В этом городе нет услуг.</Text>
+      ) : (
+        cityCells.map((cell) => (
+          <PricingRow
+            key={`${cell.cityId}|${cell.serviceKey}`}
+            cell={cell}
+            onSave={(coinCost, enabled) => save(cell, coinCost, enabled)}
+          />
+        ))
+      )}
+
+      <CityPicker
+        visible={pickerOpen}
+        cities={cities}
+        selectedId={cityId}
+        onSelect={(id) => {
+          setCityId(id);
+          setPickerOpen(false);
+        }}
+        onClose={() => setPickerOpen(false)}
+      />
+      <CityPicker
+        visible={copyOpen}
+        cities={cities.filter((c) => c.id !== cityId)}
+        selectedId=""
+        onSelect={(id) => {
+          copyFrom(id);
+          setCopyOpen(false);
+        }}
+        onClose={() => setCopyOpen(false)}
+      />
+    </View>
+  );
+}
+
+// Пользователи: корректировка баланса (монеты) + бан.
+const ADMIN_PAGE = 20;
+
+function AdminUsersPanel() {
+  const [q, setQ] = useState("");
+  const [list, setList] = useState<Account[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [target, setTarget] = useState<Account | null>(null);
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const loadPage = useCallback(async (nextOffset: number, query: string, append: boolean) => {
+    setLoading(true);
+    try {
+      const page = await fetchUsers({ q: query, limit: ADMIN_PAGE, offset: nextOffset });
+      setList((cur) => (append ? [...cur, ...page] : page));
+      setHasMore(page.length === ADMIN_PAGE);
+      setOffset(nextOffset);
+    } catch {
+      // тихо
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Поиск с задержкой (debounce), сброс на первую страницу.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      void loadPage(0, q, false);
+    }, 350);
+    return () => clearTimeout(t);
+  }, [q, loadPage]);
+
+  const reload = useCallback(() => {
+    void loadPage(0, q, false);
+  }, [loadPage, q]);
+
+  async function adjust(sign: number) {
+    const val = Math.round(Number(amount) || 0) * sign;
+    if (!target?.id || !val) return;
+    setBusy(true);
+    try {
+      await adminAdjustBalance(target.id, val, note.trim());
+      setTarget(null);
+      setAmount("");
+      setNote("");
+      reload();
+    } catch {
+      // тихо
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleBan() {
+    if (!target?.id) return;
+    setBusy(true);
+    try {
+      await adminSetBanned(target.id, !target.banned);
+      setTarget(null);
+      reload();
+    } catch {
+      // тихо
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Пользователи</Text>
+      <TextInput
+        value={q}
+        onChangeText={setQ}
+        placeholder="Поиск по имени, почте, телефону"
+        placeholderTextColor={colors.inkFaint}
+        autoCapitalize="none"
+        style={ui.input}
+      />
+      {list.length === 0 && !loading ? (
+        <Text style={styles.panelSubtitle}>Ничего не найдено.</Text>
+      ) : (
+        list.map((u) => (
+          <Pressable
+            key={u.id}
+            style={styles.adminUserRow}
+            onPress={() => {
+              setTarget(u);
+              setAmount("");
+              setNote("");
+            }}
+          >
+            <Text style={styles.adminUserName} numberOfLines={1}>
+              {u.banned ? "⛔ " : u.verified ? "✓ " : ""}
+              {u.name}
+            </Text>
+            <Text style={styles.adminUserMeta} numberOfLines={1}>
+              {u.role === "driver" ? "исполнитель" : "заказчик"} · {u.phone || u.email}
+              {u.role === "driver" ? ` · ${rub.format(u.balance ?? 0)} мон.` : ""}
+            </Text>
+          </Pressable>
+        ))
+      )}
+      {hasMore ? (
+        <Pressable style={ui.ghostButton} onPress={() => loadPage(offset + ADMIN_PAGE, q, true)} disabled={loading}>
+          <Text style={ui.ghostButtonText}>{loading ? "Загрузка…" : "Показать ещё"}</Text>
+        </Pressable>
+      ) : null}
+
+      <Modal visible={Boolean(target)} transparent animationType="fade" onRequestClose={() => setTarget(null)}>
+        <View style={styles.centerModalBackdrop}>
+          <View style={styles.centerModalCard}>
+            <Text style={styles.panelTitle}>{target?.name}</Text>
+            <Text style={styles.panelSubtitle}>Баланс: {rub.format(target?.balance ?? 0)} монет</Text>
+            <TextInput
+              value={amount}
+              onChangeText={setAmount}
+              placeholder="сумма, монет"
+              placeholderTextColor={colors.inkFaint}
+              keyboardType="number-pad"
+              style={ui.input}
+            />
+            <TextInput
+              value={note}
+              onChangeText={setNote}
+              placeholder="причина (необязательно)"
+              placeholderTextColor={colors.inkFaint}
+              style={ui.input}
+            />
+            <View style={styles.rowGap}>
+              <Pressable style={[ui.primaryButton, styles.flex]} onPress={() => adjust(1)} disabled={busy}>
+                <Text style={ui.primaryButtonText}>Начислить</Text>
+              </Pressable>
+              <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => adjust(-1)} disabled={busy}>
+                <Text style={ui.ghostButtonText}>Списать</Text>
+              </Pressable>
+            </View>
+            <Pressable style={ui.ghostButton} onPress={toggleBan} disabled={busy}>
+              <MaterialCommunityIcons
+                name={target?.banned ? "account-check-outline" : "account-cancel-outline"}
+                size={18}
+                color={colors.warning}
+              />
+              <Text style={[ui.ghostButtonText, { color: colors.warning }]}>
+                {target?.banned ? "Разбанить" : "Забанить"}
+              </Text>
+            </Pressable>
+            <Pressable onPress={() => setTarget(null)}>
+              <Text style={styles.locationNote}>Закрыть</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+// Лента заказов для модерации (фильтр по статусу).
+function AdminOrdersFeed({ cities }: { cities: City[] }) {
+  const [status, setStatus] = useState<string | null>(null);
+  const [orders, setOrders] = useState<AdminOrder[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const cityNames = useMemo(() => new Map(cities.map((c) => [c.id, c.name])), [cities]);
+
+  const loadPage = useCallback(async (nextOffset: number, st: string | null, append: boolean) => {
+    setLoading(true);
+    try {
+      const page = await fetchAdminOrders({ status: st, limit: ADMIN_PAGE, offset: nextOffset });
+      setOrders((cur) => (append ? [...cur, ...page] : page));
+      setHasMore(page.length === ADMIN_PAGE);
+      setOffset(nextOffset);
+    } catch {
+      // тихо
+    } finally {
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void loadPage(0, status, false);
+  }, [status, loadPage]);
 
-  async function decide(id: string, approve: boolean) {
+  const filters: { key: string | null; label: string }[] = [
+    { key: null, label: "Все" },
+    { key: "open", label: "Открытые" },
+    { key: "matched", label: "В работе" },
+    { key: "finished", label: "Завершены" },
+    { key: "done", label: "Закрыты" }
+  ];
+
+  return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Заказы</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.placeRow}>
+        {filters.map((f) => (
+          <Pressable key={f.label} onPress={() => setStatus(f.key)} style={[ui.pill, status === f.key && ui.pillActive]}>
+            <Text style={[ui.pillText, status === f.key && ui.pillTextActive]}>{f.label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+      {orders.length === 0 ? (
+        <Text style={styles.panelSubtitle}>Нет заказов.</Text>
+      ) : (
+        orders.map((o) => {
+          const svc = serviceByKey(o.service);
+          return (
+            <View key={o.id} style={styles.adminUserRow}>
+              <View style={styles.rowBetween}>
+                <Text style={styles.adminUserName} numberOfLines={1}>
+                  {svc.title} · {rub.format(o.price)} ₽
+                </Text>
+                <Text style={styles.bidMeta}>{statusLabel(o.status as OrderStatus)}</Text>
+              </View>
+              <Text style={styles.adminUserMeta} numberOfLines={1}>
+                {cityNames.get(o.cityId) || o.cityId} · {o.customerName} · {o.bids} откл.
+              </Text>
+            </View>
+          );
+        })
+      )}
+      {hasMore ? (
+        <Pressable style={ui.ghostButton} onPress={() => loadPage(offset + ADMIN_PAGE, status, true)} disabled={loading}>
+          <Text style={ui.ghostButtonText}>{loading ? "Загрузка…" : "Показать ещё"}</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+// Лог последних транзакций платформы.
+function AdminTransactionsFeed() {
+  const [tx, setTx] = useState<AdminTransaction[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const loadPage = useCallback(async (nextOffset: number, append: boolean) => {
+    setLoading(true);
     try {
-      await decideVerification(id, approve);
-      void load();
+      const r = await fetchAdminTransactions(ADMIN_PAGE, nextOffset);
+      setTx((cur) => (append ? [...cur, ...r.transactions] : r.transactions));
+      setHasMore(r.transactions.length === ADMIN_PAGE);
+      setOffset(nextOffset);
+    } catch {
+      // тихо
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPage(0, false);
+  }, [loadPage]);
+
+  return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Транзакции</Text>
+      {tx.length === 0 ? (
+        <Text style={styles.panelSubtitle}>Нет движений.</Text>
+      ) : (
+        tx.map((t) => (
+          <View key={t.id} style={styles.adminUserRow}>
+            <View style={styles.rowBetween}>
+              <Text style={styles.adminUserName} numberOfLines={1}>
+                {t.accountName}
+              </Text>
+              <Text style={[styles.adminUserName, { color: t.amount >= 0 ? colors.positive : colors.warning }]}>
+                {t.amount >= 0 ? "+" : ""}
+                {rub.format(t.amount)} мон.
+              </Text>
+            </View>
+            <Text style={styles.adminUserMeta} numberOfLines={1}>
+              {t.type} · {t.note || "—"}
+            </Text>
+          </View>
+        ))
+      )}
+      {hasMore ? (
+        <Pressable style={ui.ghostButton} onPress={() => loadPage(offset + ADMIN_PAGE, true)} disabled={loading}>
+          <Text style={ui.ghostButtonText}>{loading ? "Загрузка…" : "Показать ещё"}</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+const CATALOG_ICONS = [
+  "tanker-truck", "dump-truck", "truck", "dolly", "crane", "excavator",
+  "truck-cargo-container", "pipe-wrench", "flash", "fire", "ethernet-cable",
+  "water-pump", "wrench", "hammer", "shovel", "toolbox", "broom", "snowflake"
+];
+
+// Управление каталогом: добавить город, добавить услугу, доступность по городу.
+function AdminCatalogPanel({ catalog, onChanged }: { catalog: Catalog; onChanged: () => void }) {
+  // Города
+  const [cId, setCId] = useState("");
+  const [cName, setCName] = useState("");
+  const [cRegion, setCRegion] = useState(catalog.regions[0]?.id ?? "");
+  const [cLng, setCLng] = useState("");
+  const [cLat, setCLat] = useState("");
+  const [cMsg, setCMsg] = useState("");
+
+  // Услуги
+  const [sKey, setSKey] = useState("");
+  const [sTitle, setSTitle] = useState("");
+  const [sSub, setSSub] = useState("");
+  const [sIcon, setSIcon] = useState(CATALOG_ICONS[0]);
+  const [sAccent, setSAccent] = useState("#556B8C");
+  const [sCat, setSCat] = useState(catalog.categories?.[0]?.key ?? "transport");
+  const [sMsg, setSMsg] = useState("");
+
+  // Доступность
+  const [availCity, setAvailCity] = useState(catalog.cities[0]?.id ?? "");
+  const [availPickerOpen, setAvailPickerOpen] = useState(false);
+  const availCityObj = catalog.cities.find((c) => c.id === availCity);
+
+  async function addCityNow() {
+    setCMsg("");
+    if (!cId.trim() || !cName.trim() || !cLng.trim() || !cLat.trim()) {
+      setCMsg("Заполните все поля");
+      return;
+    }
+    try {
+      await adminAddCity({
+        id: cId.trim(),
+        regionId: cRegion,
+        name: cName.trim(),
+        centerLng: Number(cLng),
+        centerLat: Number(cLat)
+      });
+      setCId("");
+      setCName("");
+      setCLng("");
+      setCLat("");
+      setCMsg("Город добавлен ✓");
+      onChanged();
+    } catch (e) {
+      setCMsg(e instanceof ApiError ? e.message : "Ошибка");
+    }
+  }
+
+  async function addServiceNow() {
+    setSMsg("");
+    if (!sKey.trim() || !sTitle.trim() || !sSub.trim()) {
+      setSMsg("Заполните key, название, подзаголовок");
+      return;
+    }
+    try {
+      await adminAddService({
+        key: sKey.trim(),
+        title: sTitle.trim(),
+        subtitle: sSub.trim(),
+        icon: sIcon,
+        accent: sAccent.trim(),
+        category: sCat
+      });
+      setSKey("");
+      setSTitle("");
+      setSSub("");
+      setSMsg("Услуга добавлена ✓");
+      onChanged();
+    } catch (e) {
+      setSMsg(e instanceof ApiError ? e.message : "Ошибка");
+    }
+  }
+
+  async function toggleAvail(serviceKey: string, enabled: boolean) {
+    try {
+      await adminSetCityService(availCity, serviceKey, enabled);
+      onChanged();
     } catch {
       // тихо
     }
   }
 
   return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Каталог</Text>
+
+      <View style={styles.divBlock}>
+        <Text style={ui.label}>Добавить город</Text>
+        <TextInput value={cId} onChangeText={setCId} placeholder="id (латиница)" placeholderTextColor={colors.inkFaint} autoCapitalize="none" style={ui.input} />
+        <TextInput value={cName} onChangeText={setCName} placeholder="название" placeholderTextColor={colors.inkFaint} style={ui.input} />
+        <View style={styles.pillWrap}>
+          {catalog.regions.map((r) => (
+            <Pressable key={r.id} onPress={() => setCRegion(r.id)} style={[ui.pill, cRegion === r.id && ui.pillActive]}>
+              <Text style={[ui.pillText, cRegion === r.id && ui.pillTextActive]}>{r.name}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={styles.rowGap}>
+          <TextInput value={cLng} onChangeText={setCLng} placeholder="долгота (lng)" placeholderTextColor={colors.inkFaint} keyboardType="numbers-and-punctuation" style={[ui.input, styles.flex]} />
+          <TextInput value={cLat} onChangeText={setCLat} placeholder="широта (lat)" placeholderTextColor={colors.inkFaint} keyboardType="numbers-and-punctuation" style={[ui.input, styles.flex]} />
+        </View>
+        {cMsg ? <Text style={cMsg.includes("✓") ? styles.savedNote : ui.errorText}>{cMsg}</Text> : null}
+        <Pressable style={ui.ghostButton} onPress={addCityNow}>
+          <MaterialCommunityIcons name="plus" size={18} color={colors.ink} />
+          <Text style={ui.ghostButtonText}>Добавить город</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.divBlock}>
+        <Text style={ui.label}>Добавить услугу</Text>
+        <TextInput value={sKey} onChangeText={setSKey} placeholder="key (латиница)" placeholderTextColor={colors.inkFaint} autoCapitalize="none" style={ui.input} />
+        <TextInput value={sTitle} onChangeText={setSTitle} placeholder="название" placeholderTextColor={colors.inkFaint} style={ui.input} />
+        <TextInput value={sSub} onChangeText={setSSub} placeholder="подзаголовок" placeholderTextColor={colors.inkFaint} style={ui.input} />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.placeRow}>
+          {CATALOG_ICONS.map((ic) => (
+            <Pressable key={ic} onPress={() => setSIcon(ic)} style={[styles.iconChoice, sIcon === ic && { borderColor: colors.ink, borderWidth: 2 }]}>
+              <MaterialCommunityIcons name={ic as keyof typeof MaterialCommunityIcons.glyphMap} size={22} color={colors.ink} />
+            </Pressable>
+          ))}
+        </ScrollView>
+        <View style={styles.rowGap}>
+          <View style={[styles.colorSwatch, { backgroundColor: /^#[0-9a-fA-F]{6}$/.test(sAccent) ? sAccent : colors.line }]} />
+          <TextInput value={sAccent} onChangeText={setSAccent} placeholder="#RRGGBB" placeholderTextColor={colors.inkFaint} autoCapitalize="none" style={[ui.input, styles.flex]} />
+        </View>
+        <View style={styles.pillWrap}>
+          {(catalog.categories ?? []).map((cat) => (
+            <Pressable key={cat.key} onPress={() => setSCat(cat.key)} style={[ui.pill, sCat === cat.key && ui.pillActive]}>
+              <Text style={[ui.pillText, sCat === cat.key && ui.pillTextActive]}>{cat.title}</Text>
+            </Pressable>
+          ))}
+        </View>
+        {sMsg ? <Text style={sMsg.includes("✓") ? styles.savedNote : ui.errorText}>{sMsg}</Text> : null}
+        <Pressable style={ui.ghostButton} onPress={addServiceNow}>
+          <MaterialCommunityIcons name="plus" size={18} color={colors.ink} />
+          <Text style={ui.ghostButtonText}>Добавить услугу</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.divBlock}>
+        <Text style={ui.label}>Доступность услуг в городе</Text>
+        <Pressable style={styles.selectButton} onPress={() => setAvailPickerOpen(true)}>
+          <MaterialCommunityIcons name="map-marker-outline" size={18} color={colors.ink} />
+          <Text style={styles.selectButtonText}>{availCityObj?.name ?? "Город"}</Text>
+          <MaterialCommunityIcons name="chevron-down" size={18} color={colors.inkFaint} />
+        </Pressable>
+        {catalog.services.map((s) => {
+          const on = availCityObj?.services.includes(s.key) ?? false;
+          return (
+            <View key={s.key} style={styles.pricingRow}>
+              <MaterialCommunityIcons name={s.icon} size={18} color={s.accent} />
+              <Text style={styles.pricingService} numberOfLines={1}>{s.title}</Text>
+              <Switch
+                value={on}
+                onValueChange={(v) => toggleAvail(s.key, v)}
+                trackColor={{ true: colors.ink, false: colors.line }}
+                thumbColor={colors.surface}
+              />
+            </View>
+          );
+        })}
+        <CityPicker
+          visible={availPickerOpen}
+          cities={catalog.cities}
+          selectedId={availCity}
+          onSelect={(id) => {
+            setAvailCity(id);
+            setAvailPickerOpen(false);
+          }}
+          onClose={() => setAvailPickerOpen(false)}
+        />
+      </View>
+    </View>
+  );
+}
+
+function AdminScreen({ catalog, onCatalogChanged }: { catalog: Catalog; onCatalogChanged: () => void }) {
+  const [pending, setPending] = useState<PendingVerificationRequest[]>([]);
+  const [analytics, setAnalytics] = useState<DemandAnalytics | null>(null);
+  const [days, setDays] = useState(30);
+  const [cityFilter, setCityFilter] = useState<string | null>(null);
+  const [cityPickerOpen, setCityPickerOpen] = useState(false);
+  const [zoomPhoto, setZoomPhoto] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setPending(await fetchPendingVerificationRequests());
+    } catch {
+      // нет прав / сеть
+    }
+  }, []);
+
+  const loadAnalytics = useCallback(async () => {
+    try {
+      setAnalytics(await fetchAnalytics(days, cityFilter));
+    } catch {
+      // тихо
+    }
+  }, [days, cityFilter]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    void loadAnalytics();
+  }, [loadAnalytics]);
+
+  async function decide(id: string, approve: boolean) {
+    try {
+      await decideVerificationRequest(id, approve);
+      void load();
+    } catch {
+      // тихо
+    }
+  }
+
+  const t = analytics?.totals;
+  const fillRate = t && t.orders > 0 ? Math.round((t.doneOrders / t.orders) * 100) : 0;
+  const maxCatGmv = analytics?.byCategory[0]?.gmv || 1;
+  const maxSvcGmv = analytics?.byService[0]?.gmv || 1;
+  const cityFilterName = cityFilter ? catalog.cities.find((c) => c.id === cityFilter)?.name ?? "Город" : "Все города";
+
+  return (
     <>
+      <View style={ui.card}>
+        <Text style={styles.panelTitle}>Аналитика</Text>
+
+        <View style={styles.pillRow}>
+          {[7, 30, 90].map((d) => (
+            <Pressable key={d} onPress={() => setDays(d)} style={[ui.pill, days === d && ui.pillActive]}>
+              <Text style={[ui.pillText, days === d && ui.pillTextActive]}>{d} дн.</Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <View style={styles.rowGap}>
+          <Pressable style={[styles.selectButton, styles.flex]} onPress={() => setCityPickerOpen(true)}>
+            <MaterialCommunityIcons name="map-marker-outline" size={18} color={colors.ink} />
+            <Text style={styles.selectButtonText}>{cityFilterName}</Text>
+            <MaterialCommunityIcons name="chevron-down" size={18} color={colors.inkFaint} />
+          </Pressable>
+          {cityFilter ? (
+            <Pressable style={ui.ghostButton} onPress={() => setCityFilter(null)}>
+              <Text style={ui.ghostButtonText}>Все города</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        {!t || t.orders === 0 ? (
+          <Text style={styles.panelSubtitle}>Пока нет заказов за этот период.</Text>
+        ) : (
+          <>
+            <View style={styles.metricGrid}>
+              <MetricCard label="Оборот, ₽" value={rub.format(t.gmv)} sub={`выполнено ${rub.format(t.doneGmv)} ₽`} />
+              <MetricCard label="Заказов" value={String(t.orders)} sub={`выполнено ${fillRate}%`} />
+              <MetricCard label="Заказчики" value={String(t.activeClients)} sub={`новых ${t.newClients}`} />
+              <MetricCard label="Исполнители" value={String(t.activeDrivers)} sub={`новых ${t.newDrivers}`} />
+              <MetricCard label="Посещения" value={String(t.clientLogins + t.driverLogins)} sub={`кл ${t.clientLogins} · исп ${t.driverLogins}`} />
+              <MetricCard label="Доход платформы" value={`${rub.format(t.coinRevenue)} мон.`} sub={`≈ ${rub.format(coinsToRub(t.coinRevenue))} ₽`} />
+              <MetricCard label="Удержание" value={`${t.repeatRate}%`} sub="повторили заказ" />
+            </View>
+
+            {analytics && analytics.byCategory.length > 0 ? (
+              <View style={styles.divBlock}>
+                <Text style={ui.label}>Оборот по категориям</Text>
+                {analytics.byCategory.map((c) => (
+                  <View key={c.key} style={styles.analyticsRow}>
+                    <Text style={styles.analyticsLabel} numberOfLines={1}>{c.title}</Text>
+                    <View style={styles.analyticsBar}>
+                      <View style={[styles.analyticsBarFill, { width: `${Math.max(6, Math.round((c.gmv / maxCatGmv) * 100))}%` }]} />
+                    </View>
+                    <Text style={styles.analyticsMoney}>{rub.format(c.gmv)} ₽</Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            <View style={styles.divBlock}>
+              <Text style={ui.label}>По услугам</Text>
+              {analytics!.byService.map((s) => (
+                <View key={s.key} style={styles.analyticsRow}>
+                  <Text style={styles.analyticsLabel} numberOfLines={1}>{s.title}</Text>
+                  <View style={styles.analyticsBar}>
+                    <View style={[styles.analyticsBarFill, { width: `${Math.max(6, Math.round((s.gmv / maxSvcGmv) * 100))}%` }]} />
+                  </View>
+                  <Text style={styles.analyticsMoney}>
+                    {s.count} · {rub.format(s.gmv)} ₽
+                  </Text>
+                </View>
+              ))}
+            </View>
+
+            {(() => {
+              const deficit = (analytics?.matrix ?? []).filter((m) => m.count >= 2 && m.supply < m.count * 0.5);
+              return deficit.length > 0 ? (
+                <View style={[styles.divBlock, styles.deficitBox]}>
+                  <Text style={[ui.label, { color: colors.warning }]}>Дефицит: спрос есть, исполнителей мало</Text>
+                  {deficit.slice(0, 5).map((m) => (
+                    <View key={`d-${m.cityId}|${m.serviceKey}`} style={styles.rowBetween}>
+                      <Text style={styles.panelSubtitle} numberOfLines={1}>
+                        {m.cityName} · {m.serviceName}
+                      </Text>
+                      <Text style={[styles.analyticsMoney, { color: colors.warning }]}>
+                        {m.count} зак. · {m.supply} исп.
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null;
+            })()}
+
+            {analytics && analytics.matrix.length > 0 ? (
+              <View style={styles.divBlock}>
+                <Text style={ui.label}>Клетки: город × ниша</Text>
+                {analytics.matrix.slice(0, 15).map((m) => (
+                  <View key={`${m.cityId}|${m.serviceKey}`} style={styles.cellRow}>
+                    <View style={styles.flex}>
+                      <Text style={styles.panelSubtitle} numberOfLines={1}>
+                        {m.cityName} · {m.serviceName}
+                      </Text>
+                      <Text style={styles.cellMeta}>
+                        {m.fillRate >= 80 ? "✓" : m.fillRate >= 40 ? "~" : "✗"} выполнено {m.fillRate}% · откл. {m.avgBids} · исп. {m.supply}
+                      </Text>
+                    </View>
+                    <Text style={styles.analyticsMoney}>
+                      {m.count} · {rub.format(m.gmv)} ₽
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+          </>
+        )}
+
+        <CityPicker
+          visible={cityPickerOpen}
+          cities={catalog.cities}
+          selectedId={cityFilter ?? ""}
+          onSelect={(id) => {
+            setCityFilter(id);
+            setCityPickerOpen(false);
+          }}
+          onClose={() => setCityPickerOpen(false)}
+        />
+      </View>
+
+      <AdminPricingPanel cities={catalog.cities} />
+
       <View style={ui.card}>
         <Text style={styles.panelTitle}>Заявки на верификацию</Text>
         {pending.length === 0 ? (
           <Text style={styles.panelSubtitle}>Нет заявок на модерации.</Text>
         ) : (
-          pending.map((u) => (
-            <View key={u.id} style={styles.adminRow}>
-              <View style={styles.flex}>
-                <Text style={styles.bidDriver}>{u.name}</Text>
-                <Text style={styles.bidMeta}>
-                  {u.phone || u.email} · {(u.services ?? []).join(", ") || "услуги не указаны"}
-                </Text>
+          pending.map((r) => {
+            const svc = serviceByKey(r.serviceKey);
+            return (
+              <View key={r.id} style={styles.verifAdminCard}>
+                <Pressable onPress={() => setZoomPhoto(r.photo)}>
+                  <Image source={{ uri: r.photo }} style={styles.verifThumb} resizeMode="cover" />
+                </Pressable>
+                <View style={styles.flex}>
+                  <Text style={styles.bidDriver}>{r.accountName}</Text>
+                  <Text style={styles.bidMeta}>
+                    {svc.title} · {r.docType}
+                  </Text>
+                  <Text style={styles.bidMeta}>{r.accountPhone || r.accountEmail}</Text>
+                  <View style={styles.rowGap}>
+                    <Pressable style={styles.rejectButton} onPress={() => decide(r.id, false)}>
+                      <Text style={styles.rejectButtonText}>Отклонить</Text>
+                    </Pressable>
+                    <Pressable style={styles.acceptButton} onPress={() => decide(r.id, true)}>
+                      <Text style={styles.acceptButtonText}>Одобрить</Text>
+                    </Pressable>
+                  </View>
+                </View>
               </View>
-              <Pressable style={styles.rejectButton} onPress={() => decide(u.id ?? "", false)}>
-                <Text style={styles.rejectButtonText}>Отклонить</Text>
-              </Pressable>
-              <Pressable style={styles.acceptButton} onPress={() => decide(u.id ?? "", true)}>
-                <Text style={styles.acceptButtonText}>Одобрить</Text>
-              </Pressable>
-            </View>
-          ))
+            );
+          })
         )}
       </View>
 
-      <View style={ui.card}>
-        <Text style={styles.panelTitle}>Пользователи ({users.length})</Text>
-        {users.slice(0, 50).map((u) => (
-          <View key={u.id} style={styles.adminUserRow}>
-            <Text style={styles.adminUserName} numberOfLines={1}>
-              {u.verified ? "✓ " : ""}
-              {u.name}
-            </Text>
-            <Text style={styles.adminUserMeta} numberOfLines={1}>
-              {u.role === "driver" ? "исполнитель" : "заказчик"} · {u.phone || u.email}
-            </Text>
-          </View>
-        ))}
-      </View>
+      <Modal visible={Boolean(zoomPhoto)} transparent animationType="fade" onRequestClose={() => setZoomPhoto(null)}>
+        <Pressable style={styles.photoZoomBackdrop} onPress={() => setZoomPhoto(null)}>
+          {zoomPhoto ? <Image source={{ uri: zoomPhoto }} style={styles.photoZoomImage} resizeMode="contain" /> : null}
+        </Pressable>
+      </Modal>
+
+      <AdminOrdersFeed cities={catalog.cities} />
+
+      <AdminTransactionsFeed />
+
+      <AdminUsersPanel />
+
+      <AdminCatalogPanel catalog={catalog} onChanged={onCatalogChanged} />
     </>
   );
 }
@@ -2346,14 +4193,16 @@ function WalletCard({
       <View style={styles.rowBetween}>
         <View>
           <Text style={ui.label}>Баланс</Text>
-          <Text style={styles.balanceValue}>{rub.format(balance)} ₽</Text>
+          <View style={styles.balanceRow}>
+            <CoinIcon size={22} />
+            <Text style={styles.balanceValue}>{rub.format(balance)}</Text>
+          </View>
+          <Text style={styles.panelSubtitle}>≈ {rub.format(coinsToRub(balance))} ₽ · 1 монета = {COIN_RATE} ₽</Text>
         </View>
         <MaterialCommunityIcons name="wallet-outline" size={26} color={colors.inkSoft} />
       </View>
       <Text style={styles.panelSubtitle}>
-        {bidFee > 0
-          ? `Отклик стоит ${bidFee} ₽ — пополняйте баланс, чтобы откликаться на заказы.`
-          : "Сейчас отклики бесплатны. Баланс понадобится, когда включится плата за отклик."}
+        Монеты списываются за отклик в платных нишах. В остальных откликаться бесплатно.
       </Text>
       <View style={styles.pillRow}>
         {[300, 500, 1000].map((a) => (
@@ -2594,6 +4443,19 @@ const styles = StyleSheet.create({
   panelTitle: { color: colors.ink, fontSize: 18, fontWeight: "800" },
   panelSubtitle: { color: colors.inkSoft, fontSize: 13, marginTop: 2 },
   serviceRow: { gap: 8, paddingVertical: 2 },
+  serviceGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, paddingVertical: 2 },
+  categoryRow: { gap: 8, paddingVertical: 2, paddingRight: 8 },
+  categoryTab: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: colors.surfaceMuted,
+    borderWidth: 1,
+    borderColor: colors.line
+  },
+  categoryTabActive: { backgroundColor: colors.ink, borderColor: colors.ink },
+  categoryTabText: { color: colors.inkSoft, fontSize: 13, fontWeight: "700" },
+  categoryTabTextActive: { color: colors.accentText },
   serviceChip: {
     flexDirection: "row",
     alignItems: "center",
@@ -2606,6 +4468,169 @@ const styles = StyleSheet.create({
     paddingVertical: 9
   },
   serviceChipText: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  specGroupTitle: { color: colors.inkSoft, fontSize: 12, fontWeight: "700", marginTop: 4 },
+  portfolioItem: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius - 4,
+    padding: 12
+  },
+  portfolioTitle: { color: colors.ink, fontSize: 14, fontWeight: "700" },
+  portfolioLink: { color: colors.inkFaint, fontSize: 12, marginTop: 2 },
+  analyticsRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 5 },
+  analyticsLabel: { color: colors.ink, fontSize: 13, fontWeight: "700", width: 96 },
+  analyticsBar: {
+    flex: 1,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.surfaceMuted,
+    overflow: "hidden"
+  },
+  analyticsBarFill: { height: "100%", backgroundColor: colors.ink, borderRadius: 4 },
+  analyticsCount: { color: colors.inkSoft, fontSize: 13, fontWeight: "700", minWidth: 28, textAlign: "right" },
+  analyticsMoney: { color: colors.ink, fontSize: 12, fontWeight: "700", minWidth: 84, textAlign: "right" },
+  metricGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  metricCard: {
+    flexGrow: 1,
+    flexBasis: "47%",
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius - 4,
+    padding: 12,
+    gap: 2
+  },
+  metricValue: { color: colors.ink, fontSize: 18, fontWeight: "800" },
+  metricLabel: { color: colors.inkSoft, fontSize: 12, fontWeight: "700" },
+  metricSub: { color: colors.inkFaint, fontSize: 11, fontWeight: "600" },
+  cellRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 5 },
+  cellMeta: { color: colors.inkFaint, fontSize: 11, fontWeight: "600", marginTop: 2 },
+  deficitBox: { backgroundColor: colors.warningBg, borderRadius: radius - 4, padding: 12 },
+  savedNote: { color: colors.positive, fontSize: 13, fontWeight: "700" },
+  iconChoice: {
+    width: 46,
+    height: 46,
+    borderRadius: radius - 6,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  colorSwatch: { width: 46, height: 46, borderRadius: radius - 6, borderWidth: 1, borderColor: colors.line },
+  photoPreview: { width: "100%", height: 180, borderRadius: radius - 4, backgroundColor: colors.surfaceMuted },
+  portfolioPhoto: { width: "100%", height: 160, borderRadius: radius - 6, backgroundColor: colors.surfaceMuted, marginTop: 6 },
+  verifRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  verifRowText: { color: colors.ink, fontSize: 13, fontWeight: "600", flex: 1 },
+  verifiedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.positive,
+    backgroundColor: colors.positiveBg,
+    paddingHorizontal: 10,
+    paddingVertical: 6
+  },
+  verifiedBadgeText: { color: colors.positive, fontSize: 12, fontWeight: "700" },
+  verifAdminCard: {
+    flexDirection: "row",
+    gap: 12,
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.line
+  },
+  verifThumb: { width: 72, height: 72, borderRadius: radius - 6, backgroundColor: colors.surfaceMuted },
+  rowGap: { flexDirection: "row", gap: 8, marginTop: 8 },
+  photoZoomBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.9)", alignItems: "center", justifyContent: "center", padding: 16 },
+  photoZoomImage: { width: "100%", height: "80%" },
+  pricingRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 6 },
+  pricingService: { flex: 1, color: colors.ink, fontSize: 14, fontWeight: "600" },
+  pricingInput: {
+    width: 64,
+    minHeight: 40,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius - 6,
+    borderWidth: 1,
+    borderColor: colors.line,
+    paddingHorizontal: 10,
+    color: colors.ink,
+    fontSize: 14,
+    textAlign: "center"
+  },
+  pricingUnit: { color: colors.inkFaint, fontSize: 12, fontWeight: "600" },
+  coin: {
+    backgroundColor: "#E7B54B",
+    borderColor: "#B4832A",
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  coinText: { color: "#5C3D0E", fontWeight: "900" },
+  balanceRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  bidFeeRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  repeatCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: colors.surface,
+    borderRadius: radius,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: 14,
+    marginBottom: 12
+  },
+  repeatIcon: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  repeatKicker: { color: colors.inkFaint, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 },
+  repeatSubtitle: { color: colors.ink, fontSize: 14, fontWeight: "700", marginTop: 3 },
+  repeatPrice: { color: colors.ink, fontSize: 15, fontWeight: "800" },
+  placeRow: { gap: 8, paddingVertical: 2, marginBottom: 8 },
+  placeChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    maxWidth: 160
+  },
+  placeChipText: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  placeManageRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: colors.line
+  },
+  savePlaceLink: { flexDirection: "row", alignItems: "center", gap: 4 },
+  savePlaceText: { color: colors.ink, fontSize: 12, fontWeight: "700" },
+  reachBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius - 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  reachText: { flex: 1, color: colors.inkSoft, fontSize: 13, fontWeight: "600", lineHeight: 18 },
+  centerModalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24
+  },
+  centerModalCard: {
+    width: "100%",
+    backgroundColor: colors.surface,
+    borderRadius: radius,
+    padding: 20,
+    gap: 12
+  },
   driverIntro: { flexDirection: "row", alignItems: "center", gap: 12 },
   driverIcon: {
     width: 44,
@@ -2719,9 +4744,25 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 10
   },
+  bidCardBest: { borderColor: colors.ink, borderWidth: 2, backgroundColor: colors.surfaceMuted },
   bidNameRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   bidDriver: { color: colors.ink, fontSize: 15, fontWeight: "800" },
+  bidDriverLink: { textDecorationLine: "underline" },
   bidMeta: { color: colors.inkSoft, fontSize: 12, marginTop: 3 },
+  bidStatsRow: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 4, flexWrap: "wrap" },
+  bidStat: { flexDirection: "row", alignItems: "center", gap: 3 },
+  bidStatText: { color: colors.ink, fontSize: 12, fontWeight: "700" },
+  bidVerifText: { color: colors.positive, fontSize: 12, fontWeight: "700" },
+  bestBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    backgroundColor: colors.ink,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2
+  },
+  bestBadgeText: { color: colors.accentText, fontSize: 10, fontWeight: "800", textTransform: "uppercase" },
   bidSide: { alignItems: "flex-end", gap: 6 },
   bidPrice: { color: colors.ink, fontSize: 15, fontWeight: "800" },
   bidActions: { flexDirection: "row", alignItems: "center", gap: 6 },

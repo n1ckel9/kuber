@@ -31,6 +31,7 @@ function migrate() {
       subtitle TEXT NOT NULL,
       icon     TEXT NOT NULL,
       accent   TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'transport',
       sort     INTEGER NOT NULL DEFAULT 0
     );
 
@@ -188,6 +189,51 @@ function migrate() {
       text       TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
+
+    -- Портфолио исполнителя: примеры работ (заголовок, описание, ссылка на фото).
+    CREATE TABLE IF NOT EXISTS portfolio_items (
+      id          TEXT PRIMARY KEY,
+      account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      title       TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      photo_url   TEXT NOT NULL DEFAULT '',
+      sort_order  INTEGER NOT NULL DEFAULT 0,
+      created_at  INTEGER NOT NULL
+    );
+
+    -- Заявки на верификацию по услуге и типу документа (с фото документа).
+    CREATE TABLE IF NOT EXISTS verification_requests (
+      id          TEXT PRIMARY KEY,
+      account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      service_key TEXT NOT NULL,
+      doc_type    TEXT NOT NULL,
+      photo       TEXT NOT NULL DEFAULT '',
+      status      TEXT NOT NULL DEFAULT 'pending',
+      created_at  INTEGER NOT NULL,
+      decided_at  INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Плата за отклик по нише: (город × услуга) → стоимость в монетах.
+    -- Строки нет / enabled=0 → отклик бесплатный.
+    CREATE TABLE IF NOT EXISTS pricing (
+      city_id     TEXT NOT NULL,
+      service_key TEXT NOT NULL,
+      coin_cost   INTEGER NOT NULL DEFAULT 0,
+      enabled     INTEGER NOT NULL DEFAULT 0,
+      updated_at  INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (city_id, service_key)
+    );
+
+    -- Сохранённые адреса заказчика («Дом», «Дача» и т.п.).
+    CREATE TABLE IF NOT EXISTS saved_places (
+      id         TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      label      TEXT NOT NULL,
+      from_text  TEXT NOT NULL,
+      lng        REAL NOT NULL,
+      lat        REAL NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
 }
 
@@ -203,6 +249,14 @@ function createIndexes() {
     CREATE INDEX IF NOT EXISTS idx_tx_account        ON transactions(account_id);
     CREATE INDEX IF NOT EXISTS idx_messages_order     ON messages(order_id);
     CREATE INDEX IF NOT EXISTS idx_notif_account      ON notifications(account_id);
+    CREATE INDEX IF NOT EXISTS idx_portfolio_account  ON portfolio_items(account_id);
+    CREATE INDEX IF NOT EXISTS idx_orders_service     ON orders(service);
+    CREATE INDEX IF NOT EXISTS idx_verif_account      ON verification_requests(account_id);
+    CREATE INDEX IF NOT EXISTS idx_verif_status       ON verification_requests(status);
+    CREATE INDEX IF NOT EXISTS idx_places_account     ON saved_places(account_id);
+    CREATE INDEX IF NOT EXISTS idx_orders_created     ON orders(created_at);
+    CREATE INDEX IF NOT EXISTS idx_accounts_created   ON accounts(created_at);
+    CREATE INDEX IF NOT EXISTS idx_tx_created         ON transactions(created_at);
   `);
 }
 
@@ -227,6 +281,10 @@ function ensureColumns() {
   add("accounts", "available", "available INTEGER NOT NULL DEFAULT 1");
   add("accounts", "verified", "verified INTEGER NOT NULL DEFAULT 0");
   add("accounts", "verify_status", "verify_status TEXT NOT NULL DEFAULT 'none'");
+  add("accounts", "bio", "bio TEXT NOT NULL DEFAULT ''");
+  add("accounts", "last_reminded_at", "last_reminded_at INTEGER NOT NULL DEFAULT 0");
+  add("accounts", "banned", "banned INTEGER NOT NULL DEFAULT 0");
+  add("services", "category", "category TEXT NOT NULL DEFAULT 'transport'");
   add("orders", "customer_id", "customer_id TEXT NOT NULL DEFAULT ''");
   add("orders", "executor_id", "executor_id TEXT NOT NULL DEFAULT ''");
   add("orders", "reviewed", "reviewed INTEGER NOT NULL DEFAULT 0");
@@ -244,7 +302,7 @@ function seedIfEmpty() {
     "INSERT INTO cities (id, region_id, name, center_lng, center_lat, zoom, sort) VALUES (?, ?, ?, ?, ?, ?, ?)"
   );
   const insertService = db.prepare(
-    "INSERT INTO services (key, title, subtitle, icon, accent, sort) VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO services (key, title, subtitle, icon, accent, category, sort) VALUES (?, ?, ?, ?, ?, ?, ?)"
   );
   const insertCityService = db.prepare(
     "INSERT INTO city_services (city_id, service_key) VALUES (?, ?)"
@@ -281,6 +339,7 @@ function seedIfEmpty() {
         service.subtitle,
         service.icon,
         service.accent,
+        service.category ?? "transport",
         service.sort ?? 0
       );
     }
@@ -325,10 +384,48 @@ function seedIfEmpty() {
   run();
 }
 
+// Приводим реестр услуг к тому, что задано в seed.js, даже если база уже создана
+// (напр. постоянная БД на сервере). Добавляет новые услуги/категории и обновляет
+// метаданные существующих, не трогая заказы и специализации исполнителей.
+function syncServices() {
+  const upsert = db.prepare(
+    `INSERT INTO services (key, title, subtitle, icon, accent, category, sort)
+     VALUES (@key, @title, @subtitle, @icon, @accent, @category, @sort)
+     ON CONFLICT(key) DO UPDATE SET
+       title = excluded.title, subtitle = excluded.subtitle, icon = excluded.icon,
+       accent = excluded.accent, category = excluded.category, sort = excluded.sort`
+  );
+  const addCityService = db.prepare(
+    "INSERT OR IGNORE INTO city_services (city_id, service_key) VALUES (?, ?)"
+  );
+  const tx = db.transaction(() => {
+    for (const service of seed.services) {
+      upsert.run({
+        key: service.key,
+        title: service.title,
+        subtitle: service.subtitle,
+        icon: service.icon,
+        accent: service.accent,
+        category: service.category ?? "transport",
+        sort: service.sort ?? 0
+      });
+    }
+    for (const [cityId, keys] of Object.entries(seed.cityServices)) {
+      const cityExists = db.prepare("SELECT 1 FROM cities WHERE id = ?").get(cityId);
+      if (!cityExists) continue;
+      for (const key of keys) {
+        addCityService.run(cityId, key);
+      }
+    }
+  });
+  tx();
+}
+
 migrate();
 ensureColumns();
 createIndexes();
 seedIfEmpty();
+syncServices();
 
 // --- Сборка объектов в форму, ожидаемую клиентом ---------------------------
 
@@ -347,11 +444,14 @@ function cityRowToCity(row, serviceKeys) {
 function orderRowToOrder(row) {
   const bids = db
     .prepare(
-      `SELECT b.*, a.rating_sum AS a_sum, a.rating_count AS a_count, a.verified AS a_verified
+      `SELECT b.*, a.rating_sum AS a_sum, a.rating_count AS a_count, a.verified AS a_verified,
+         (SELECT COUNT(*) FROM orders o WHERE o.executor_id = b.driver_id AND o.status = 'done') AS a_jobs,
+         (SELECT COUNT(*) FROM verification_requests vr
+            WHERE vr.account_id = b.driver_id AND vr.service_key = @service AND vr.status = 'verified') AS a_verif_service
          FROM bids b LEFT JOIN accounts a ON a.id = b.driver_id
-        WHERE b.order_id = ? ORDER BY b.created_at DESC`
+        WHERE b.order_id = @orderId ORDER BY b.created_at DESC`
     )
-    .all(row.id)
+    .all({ orderId: row.id, service: row.service })
     .map((bid) => ({
       id: bid.id,
       driverId: bid.driver_id,
@@ -360,7 +460,11 @@ function orderRowToOrder(row) {
       eta: bid.eta,
       // рейтинг исполнителя: живой из аккаунта, иначе значение из ставки
       rating: bid.a_count > 0 ? bid.a_sum / bid.a_count : bid.rating,
-      verified: bid.a_verified === 1
+      ratingCount: bid.a_count || 0,
+      jobsCompleted: bid.a_jobs || 0,
+      verified: bid.a_verified === 1,
+      // профессия подтверждена документом именно для услуги этого заказа
+      verifiedService: (bid.a_verif_service || 0) > 0
     }));
 
   // Контакты выбранного исполнителя — для обмена после подтверждения.
@@ -423,7 +527,7 @@ function getCatalog() {
     )
     .all();
   const services = db
-    .prepare("SELECT key, title, subtitle, icon, accent FROM services ORDER BY sort, title")
+    .prepare("SELECT key, title, subtitle, icon, accent, category FROM services ORDER BY sort, title")
     .all();
 
   const serviceKeysByCity = new Map();
@@ -447,7 +551,15 @@ function getCatalog() {
     cities: cities.filter((city) => city.regionId === region.id)
   }));
 
-  return { regions: regionsWithCities, cities, services };
+  // Категории (метаданные для группировки услуг в UI) — статичны, берём из seed,
+  // но показываем только те, в которых реально есть услуги.
+  const usedCategories = new Set(services.map((s) => s.category).filter(Boolean));
+  const categories = (seed.categories || [])
+    .filter((c) => usedCategories.has(c.key))
+    .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0))
+    .map((c) => ({ key: c.key, title: c.title }));
+
+  return { regions: regionsWithCities, cities, services, categories };
 }
 
 function getCity(cityId) {
@@ -523,7 +635,10 @@ function toPublicAccount(row) {
     available: row.available !== 0,
     verified: row.verified === 1,
     verifyStatus: row.verify_status || "none",
-    services: getAccountServices(row.id)
+    bio: row.bio || "",
+    banned: row.banned === 1,
+    services: getAccountServices(row.id),
+    verificationBadges: getExecutorBadges(row.id)
   };
 }
 
@@ -715,10 +830,18 @@ function decideVerification(accountId, approve) {
   return toPublicAccount(db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId));
 }
 
-function listUsers() {
+// Пользователи с поиском (имя/почта/телефон) и постраничной подгрузкой.
+function listUsers({ q, limit, offset } = {}) {
+  const lim = Math.max(1, Math.min(50, Math.round(limit || 20)));
+  const off = Math.max(0, Math.round(offset || 0));
+  const like = q && q.trim() ? `%${q.trim()}%` : null;
   return db
-    .prepare("SELECT * FROM accounts ORDER BY created_at DESC LIMIT 200")
-    .all()
+    .prepare(
+      `SELECT * FROM accounts
+        WHERE (@like IS NULL OR name LIKE @like OR email LIKE @like OR phone LIKE @like)
+        ORDER BY created_at DESC LIMIT @lim OFFSET @off`
+    )
+    .all({ like, lim, off })
     .map(toPublicAccount);
 }
 
@@ -1010,9 +1133,570 @@ function addReview({ id, orderId, fromId, toId, rating, text, createdAt }) {
   return getOrder(orderId);
 }
 
+// --- Портфолио исполнителя ---------------------------------------------------
+
+function listPortfolio(accountId) {
+  return db
+    .prepare(
+      "SELECT id, title, description, photo_url, created_at FROM portfolio_items WHERE account_id = ? ORDER BY sort_order, created_at DESC LIMIT 30"
+    )
+    .all(accountId)
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      description: row.description,
+      photoUrl: row.photo_url,
+      createdAt: row.created_at
+    }));
+}
+
+function addPortfolioItem({ id, accountId, title, description, photoUrl, createdAt }) {
+  const count = db
+    .prepare("SELECT COUNT(*) AS n FROM portfolio_items WHERE account_id = ?")
+    .get(accountId).n;
+  if (count >= 30) {
+    return { ok: false };
+  }
+  db.prepare(
+    `INSERT INTO portfolio_items (id, account_id, title, description, photo_url, sort_order, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, accountId, title, description, photoUrl, createdAt, createdAt);
+  return { ok: true };
+}
+
+function deletePortfolioItem(accountId, itemId) {
+  db.prepare("DELETE FROM portfolio_items WHERE id = ? AND account_id = ?").run(itemId, accountId);
+}
+
+function setBio(accountId, bio) {
+  db.prepare("UPDATE accounts SET bio = ? WHERE id = ?").run(bio, accountId);
+}
+
+// Публичный профиль исполнителя: аккаунт + био + портфолио + последние отзывы + статистика.
+function getExecutorProfile(executorId) {
+  const account = toPublicAccount(
+    db.prepare("SELECT * FROM accounts WHERE id = ?").get(executorId)
+  );
+  if (!account) {
+    return null;
+  }
+  const reviews = db
+    .prepare(
+      `SELECT r.id, r.rating, r.text, r.created_at, a.name AS author
+         FROM reviews r LEFT JOIN accounts a ON a.id = r.from_id
+        WHERE r.to_id = ? ORDER BY r.created_at DESC LIMIT 10`
+    )
+    .all(executorId)
+    .map((row) => ({
+      id: row.id,
+      rating: row.rating,
+      text: row.text,
+      createdAt: row.created_at,
+      author: row.author || "Заказчик"
+    }));
+  const stats = getExecutorStats(executorId);
+  return {
+    ...account,
+    portfolio: listPortfolio(executorId),
+    reviews,
+    jobsCompleted: stats.jobs
+  };
+}
+
+// --- Аналитика спроса --------------------------------------------------------
+// Агрегируем из таблицы orders — отдельная таблица событий не нужна для MVP.
+
+// Богатая аналитика: деньги (GMV, доход платформы), люди (активность/логины),
+// срезы по услугам/категориям/городам и клеткам (город × ниша). Опционально
+// ограничивается городом cityId (null = все города).
+function getDemandAnalytics(fromTime, toTime, cityId) {
+  const scoped = { from: fromTime, to: toTime, cityId: cityId || null };
+  const win = { from: fromTime, to: toTime };
+
+  const totals = db
+    .prepare(
+      `SELECT COUNT(*) AS orders,
+              COALESCE(SUM(price), 0) AS gmv,
+              SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS doneOrders,
+              COALESCE(SUM(CASE WHEN status = 'done' THEN price ELSE 0 END), 0) AS doneGmv,
+              COUNT(DISTINCT customer_id) AS activeClients
+         FROM orders
+        WHERE created_at BETWEEN @from AND @to AND (@cityId IS NULL OR city_id = @cityId)`
+    )
+    .get(scoped);
+
+  const activeDrivers = db
+    .prepare(
+      `SELECT COUNT(DISTINCT b.driver_id) AS n
+         FROM bids b JOIN orders o ON o.id = b.order_id
+        WHERE b.created_at BETWEEN @from AND @to AND (@cityId IS NULL OR o.city_id = @cityId)`
+    )
+    .get(scoped).n;
+
+  const newClients = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM accounts WHERE role = 'client' AND created_at BETWEEN @from AND @to AND (@cityId IS NULL OR city_id = @cityId)"
+    )
+    .get(scoped).n;
+  const newDrivers = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM accounts WHERE role = 'driver' AND created_at BETWEEN @from AND @to AND (@cityId IS NULL OR city_id = @cityId)"
+    )
+    .get(scoped).n;
+
+  // Посещаемость (логины): сессии за период по роли.
+  const loginRows = db
+    .prepare(
+      `SELECT a.role AS role, COUNT(*) AS n
+         FROM sessions s JOIN accounts a ON a.id = s.account_id
+        WHERE s.created_at BETWEEN @from AND @to AND (@cityId IS NULL OR a.city_id = @cityId)
+        GROUP BY a.role`
+    )
+    .all(scoped);
+  let clientLogins = 0;
+  let driverLogins = 0;
+  for (const r of loginRows) {
+    if (r.role === "driver") driverLogins = r.n;
+    else clientLogins += r.n;
+  }
+
+  // Доход платформы в монетах = списания за отклики (charge, amount отрицательный).
+  const coinRevenue = db
+    .prepare("SELECT COALESCE(-SUM(amount), 0) AS n FROM transactions WHERE type = 'charge' AND created_at BETWEEN @from AND @to")
+    .get(win).n;
+
+  const byService = db
+    .prepare(
+      `SELECT service, COUNT(*) AS count, COALESCE(SUM(price), 0) AS gmv, COALESCE(ROUND(AVG(price)), 0) AS avgPrice
+         FROM orders WHERE created_at BETWEEN @from AND @to AND (@cityId IS NULL OR city_id = @cityId)
+        GROUP BY service ORDER BY gmv DESC`
+    )
+    .all(scoped);
+
+  // По городам — всегда без фильтра, чтобы видеть картину целиком.
+  const byCity = db
+    .prepare(
+      `SELECT city_id, COUNT(*) AS count, COALESCE(SUM(price), 0) AS gmv
+         FROM orders WHERE created_at BETWEEN @from AND @to
+        GROUP BY city_id ORDER BY gmv DESC`
+    )
+    .all(win);
+
+  // Клетки (город × ниша): оборот + fill-rate + глубина откликов + предложение.
+  const matrix = db
+    .prepare(
+      `SELECT o.city_id, o.service,
+              COUNT(*) AS count,
+              COALESCE(SUM(o.price), 0) AS gmv,
+              SUM(CASE WHEN o.status = 'done' THEN 1 ELSE 0 END) AS done,
+              (SELECT COUNT(*) FROM bids b JOIN orders ob ON ob.id = b.order_id
+                 WHERE ob.city_id = o.city_id AND ob.service = o.service
+                   AND ob.created_at BETWEEN @from AND @to) AS bidsTotal,
+              (SELECT COUNT(*) FROM accounts a
+                 WHERE a.role = 'driver' AND a.available = 1 AND a.city_id = o.city_id
+                   AND EXISTS (SELECT 1 FROM account_services s WHERE s.account_id = a.id AND s.service_key = o.service)) AS supply
+         FROM orders o
+        WHERE o.created_at BETWEEN @from AND @to AND (@cityId IS NULL OR o.city_id = @cityId)
+        GROUP BY o.city_id, o.service ORDER BY gmv DESC LIMIT 40`
+    )
+    .all(scoped);
+
+  // Удержание: доля заказчиков с ≥2 заказами за период.
+  const retention = db
+    .prepare(
+      `SELECT ROUND(100.0 * COUNT(DISTINCT CASE WHEN c >= 2 THEN customer_id END) / NULLIF(COUNT(DISTINCT customer_id), 0)) AS repeatRate
+         FROM (SELECT customer_id, COUNT(*) AS c FROM orders
+                WHERE created_at BETWEEN @from AND @to AND (@cityId IS NULL OR city_id = @cityId)
+                GROUP BY customer_id)`
+    )
+    .get(scoped);
+
+  return {
+    totals: {
+      ...totals,
+      activeDrivers,
+      newClients,
+      newDrivers,
+      clientLogins,
+      driverLogins,
+      coinRevenue,
+      repeatRate: retention.repeatRate || 0
+    },
+    byService,
+    byCity,
+    matrix
+  };
+}
+
+// --- Верификация по документу -----------------------------------------------
+
+// Подтверждённые квалификации исполнителя (по услугам) — для бейджей.
+function getExecutorBadges(accountId) {
+  return db
+    .prepare(
+      "SELECT DISTINCT service_key, doc_type FROM verification_requests WHERE account_id = ? AND status = 'verified'"
+    )
+    .all(accountId)
+    .map((r) => ({ serviceKey: r.service_key, docType: r.doc_type }));
+}
+
+function verificationRowToObj(r) {
+  return {
+    id: r.id,
+    accountId: r.account_id,
+    serviceKey: r.service_key,
+    docType: r.doc_type,
+    photo: r.photo,
+    status: r.status,
+    createdAt: r.created_at,
+    decidedAt: r.decided_at || 0
+  };
+}
+
+// Заявки исполнителя (свои) — без тяжёлого фото в списке.
+function listVerificationRequests(accountId) {
+  return db
+    .prepare(
+      "SELECT id, account_id, service_key, doc_type, '' AS photo, status, created_at, decided_at FROM verification_requests WHERE account_id = ? ORDER BY created_at DESC"
+    )
+    .all(accountId)
+    .map(verificationRowToObj);
+}
+
+// Есть ли уже активная (pending/verified) заявка по этой услуге.
+function hasActiveVerification(accountId, serviceKey) {
+  return Boolean(
+    db
+      .prepare(
+        "SELECT 1 FROM verification_requests WHERE account_id = ? AND service_key = ? AND status IN ('pending','verified')"
+      )
+      .get(accountId, serviceKey)
+  );
+}
+
+function countPendingVerifications(accountId) {
+  return db
+    .prepare("SELECT COUNT(*) AS n FROM verification_requests WHERE account_id = ? AND status = 'pending'")
+    .get(accountId).n;
+}
+
+function createVerificationRequest({ id, accountId, serviceKey, docType, photo, createdAt }) {
+  db.prepare(
+    `INSERT INTO verification_requests (id, account_id, service_key, doc_type, photo, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?)`
+  ).run(id, accountId, serviceKey, docType, photo, createdAt);
+  return verificationRowToObj(
+    db.prepare("SELECT * FROM verification_requests WHERE id = ?").get(id)
+  );
+}
+
+// Для админа: заявки на модерации, с фото и данными исполнителя.
+function listPendingVerificationRequests() {
+  return db
+    .prepare(
+      `SELECT v.*, a.name AS account_name, a.email AS account_email, a.phone AS account_phone
+         FROM verification_requests v JOIN accounts a ON a.id = v.account_id
+        WHERE v.status = 'pending' ORDER BY v.created_at ASC`
+    )
+    .all()
+    .map((r) => ({
+      id: r.id,
+      accountId: r.account_id,
+      accountName: r.account_name,
+      accountEmail: r.account_email,
+      accountPhone: r.account_phone || "",
+      serviceKey: r.service_key,
+      docType: r.doc_type,
+      photo: r.photo,
+      status: r.status,
+      createdAt: r.created_at
+    }));
+}
+
+function decideVerificationRequest(requestId, approve) {
+  const row = db.prepare("SELECT * FROM verification_requests WHERE id = ?").get(requestId);
+  if (!row) {
+    return null;
+  }
+  db.prepare("UPDATE verification_requests SET status = ?, decided_at = ? WHERE id = ?").run(
+    approve ? "verified" : "rejected",
+    Date.now(),
+    requestId
+  );
+  return verificationRowToObj(
+    db.prepare("SELECT * FROM verification_requests WHERE id = ?").get(requestId)
+  );
+}
+
+// --- Плата за отклик по нише (город × услуга) -------------------------------
+
+function getPricingRule(cityId, serviceKey) {
+  return db
+    .prepare("SELECT coin_cost, enabled FROM pricing WHERE city_id = ? AND service_key = ?")
+    .get(cityId, serviceKey);
+}
+
+function setPricingRule(cityId, serviceKey, coinCost, enabled) {
+  db.prepare(
+    `INSERT INTO pricing (city_id, service_key, coin_cost, enabled, updated_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(city_id, service_key) DO UPDATE SET
+       coin_cost = excluded.coin_cost, enabled = excluded.enabled, updated_at = excluded.updated_at`
+  ).run(cityId, serviceKey, Math.max(0, Math.round(coinCost)), enabled ? 1 : 0, Date.now());
+}
+
+// Все установленные правила (для админ-грида и клиентского кэша).
+function listPricingRules() {
+  return db
+    .prepare("SELECT city_id, service_key, coin_cost, enabled FROM pricing")
+    .all()
+    .map((r) => ({
+      cityId: r.city_id,
+      serviceKey: r.service_key,
+      coinCost: r.coin_cost,
+      enabled: r.enabled === 1
+    }));
+}
+
+// --- Подсказка цены (город × услуга) ----------------------------------------
+// Берём цены всех заказов по нише (это ожидания заказчиков). Мало данных → null.
+function getPriceHint(cityId, serviceKey) {
+  const prices = db
+    .prepare("SELECT price FROM orders WHERE city_id = ? AND service = ? ORDER BY price ASC")
+    .all(cityId, serviceKey)
+    .map((r) => r.price);
+  if (prices.length < 3) {
+    return null;
+  }
+  const mid = Math.floor(prices.length / 2);
+  const median = prices.length % 2 ? prices[mid] : Math.round((prices[mid - 1] + prices[mid]) / 2);
+  return { count: prices.length, min: prices[0], max: prices[prices.length - 1], median };
+}
+
+// --- Сохранённые адреса заказчика -------------------------------------------
+function listPlaces(accountId) {
+  return db
+    .prepare("SELECT * FROM saved_places WHERE account_id = ? ORDER BY created_at DESC")
+    .all(accountId)
+    .map((r) => ({ id: r.id, label: r.label, fromText: r.from_text, lng: r.lng, lat: r.lat, createdAt: r.created_at }));
+}
+
+function addPlace({ id, accountId, label, fromText, lng, lat, createdAt }) {
+  db.prepare(
+    "INSERT INTO saved_places (id, account_id, label, from_text, lng, lat, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).run(id, accountId, label, fromText, lng, lat, createdAt);
+  return { id, label, fromText, lng, lat, createdAt };
+}
+
+function deletePlace(id, accountId) {
+  db.prepare("DELETE FROM saved_places WHERE id = ? AND account_id = ?").run(id, accountId);
+}
+
+// --- Охват заказа: сколько исполнителей потенциально видят открытый заказ ----
+function countReach(cityId, serviceKey) {
+  const row = db
+    .prepare(
+      `SELECT COUNT(DISTINCT a.id) AS reach FROM accounts a
+        WHERE a.role = 'driver' AND a.available = 1 AND a.city_id = ?
+          AND EXISTS (SELECT 1 FROM account_services s WHERE s.account_id = a.id AND s.service_key = ?)`
+    )
+    .get(cityId, serviceKey);
+  return row ? row.reach : 0;
+}
+
+// --- Напоминания по циклу потребления ---------------------------------------
+// Кандидаты: последний выполненный заказ по нише старше cutoff, нет активного
+// расписания и открытого заказа по этой услуге, давно не напоминали.
+function getReminderCandidates(cutoff) {
+  return db
+    .prepare(
+      `SELECT o.customer_id AS accountId, o.service AS service, MAX(o.created_at) AS lastOrder,
+              a.last_reminded_at AS lastReminded
+         FROM orders o JOIN accounts a ON a.id = o.customer_id
+        WHERE o.status = 'done'
+        GROUP BY o.customer_id, o.service
+       HAVING MAX(o.created_at) <= @cutoff
+          AND a.last_reminded_at <= @cutoff
+          AND NOT EXISTS (SELECT 1 FROM schedules s
+                            WHERE s.customer_id = o.customer_id AND s.service = o.service AND s.active = 1)
+          AND NOT EXISTS (SELECT 1 FROM orders o3
+                            WHERE o3.customer_id = o.customer_id AND o3.service = o.service
+                              AND o3.status IN ('open','matched','finished'))`
+    )
+    .all({ cutoff });
+}
+
+function markReminded(accountId, when) {
+  db.prepare("UPDATE accounts SET last_reminded_at = ? WHERE id = ?").run(when, accountId);
+}
+
+// --- Массовые цены ----------------------------------------------------------
+function setPricingRules(rules) {
+  const stmt = db.prepare(
+    `INSERT INTO pricing (city_id, service_key, coin_cost, enabled, updated_at)
+     VALUES (@cityId, @serviceKey, @coinCost, @enabled, @now)
+     ON CONFLICT(city_id, service_key) DO UPDATE SET
+       coin_cost = excluded.coin_cost, enabled = excluded.enabled, updated_at = excluded.updated_at`
+  );
+  const tx = db.transaction((list) => {
+    for (const r of list) {
+      stmt.run({
+        cityId: r.cityId,
+        serviceKey: r.serviceKey,
+        coinCost: Math.max(0, Math.round(r.coinCost || 0)),
+        enabled: r.enabled ? 1 : 0,
+        now: Date.now()
+      });
+    }
+  });
+  tx(rules);
+}
+
+// --- Модерация пользователей ------------------------------------------------
+function setBanned(accountId, banned) {
+  db.prepare("UPDATE accounts SET banned = ? WHERE id = ?").run(banned ? 1 : 0, accountId);
+}
+
+// Ручная корректировка баланса админом (amount>0 — начисление, <0 — списание).
+function adminAdjustBalance(accountId, amount, note) {
+  return credit(accountId, {
+    id: `t_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    amount,
+    type: amount >= 0 ? "bonus" : "charge",
+    note: note || (amount >= 0 ? "Начисление админом" : "Списание админом"),
+    createdAt: Date.now()
+  });
+}
+
+// --- Админ: ленты заказов и транзакций --------------------------------------
+function listOrdersAdmin({ cityId, status, limit, offset }) {
+  const lim = Math.max(1, Math.min(50, Math.round(limit || 20)));
+  const off = Math.max(0, Math.round(offset || 0));
+  const rows = db
+    .prepare(
+      `SELECT o.id, o.city_id, o.service, o.price, o.status, o.customer_name, o.created_at,
+              (SELECT COUNT(*) FROM bids b WHERE b.order_id = o.id) AS bids
+         FROM orders o
+        WHERE (@cityId IS NULL OR o.city_id = @cityId)
+          AND (@status IS NULL OR o.status = @status)
+        ORDER BY o.created_at DESC LIMIT @lim OFFSET @off`
+    )
+    .all({ cityId: cityId || null, status: status || null, lim, off });
+  return rows.map((r) => ({
+    id: r.id,
+    cityId: r.city_id,
+    service: r.service,
+    price: r.price,
+    status: r.status,
+    customerName: r.customer_name,
+    bids: r.bids,
+    createdAt: r.created_at
+  }));
+}
+
+function listRecentTransactions(limit, offset) {
+  const lim = Math.max(1, Math.min(50, Math.round(limit || 20)));
+  const off = Math.max(0, Math.round(offset || 0));
+  return db
+    .prepare(
+      `SELECT t.id, t.account_id, t.type, t.amount, t.balance_after, t.note, t.created_at, a.name AS account_name
+         FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id
+        ORDER BY t.created_at DESC LIMIT ? OFFSET ?`
+    )
+    .all(lim, off)
+    .map((t) => ({
+      id: t.id,
+      accountId: t.account_id,
+      accountName: t.account_name || "—",
+      type: t.type,
+      amount: t.amount,
+      balanceAfter: t.balance_after,
+      note: t.note,
+      createdAt: t.created_at
+    }));
+}
+
+// --- Админ: управление каталогом --------------------------------------------
+function upsertRegion(id, name, sort) {
+  db.prepare(
+    `INSERT INTO regions (id, name, sort) VALUES (?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET name = excluded.name, sort = excluded.sort`
+  ).run(id, name, Math.max(0, Math.round(sort || 0)));
+}
+
+function upsertCity(id, regionId, name, centerLng, centerLat, zoom, sort) {
+  if (!db.prepare("SELECT 1 FROM regions WHERE id = ?").get(regionId)) {
+    throw new Error("region_not_found");
+  }
+  db.prepare(
+    `INSERT INTO cities (id, region_id, name, center_lng, center_lat, zoom, sort)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       region_id = excluded.region_id, name = excluded.name,
+       center_lng = excluded.center_lng, center_lat = excluded.center_lat,
+       zoom = excluded.zoom, sort = excluded.sort`
+  ).run(id, regionId, name, Number(centerLng), Number(centerLat), Math.max(1, Math.round(zoom || 11)), Math.max(0, Math.round(sort || 0)));
+}
+
+function upsertService(key, title, subtitle, icon, accent, category, sort) {
+  db.prepare(
+    `INSERT INTO services (key, title, subtitle, icon, accent, category, sort)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       title = excluded.title, subtitle = excluded.subtitle, icon = excluded.icon,
+       accent = excluded.accent, category = excluded.category, sort = excluded.sort`
+  ).run(key, title, subtitle, icon, accent, category || "transport", Math.max(0, Math.round(sort || 0)));
+}
+
+function setCityService(cityId, serviceKey, enabled) {
+  if (!db.prepare("SELECT 1 FROM cities WHERE id = ?").get(cityId)) {
+    throw new Error("city_not_found");
+  }
+  if (!db.prepare("SELECT 1 FROM services WHERE key = ?").get(serviceKey)) {
+    throw new Error("service_not_found");
+  }
+  if (enabled) {
+    db.prepare("INSERT OR IGNORE INTO city_services (city_id, service_key) VALUES (?, ?)").run(cityId, serviceKey);
+  } else {
+    db.prepare("DELETE FROM city_services WHERE city_id = ? AND service_key = ?").run(cityId, serviceKey);
+  }
+}
+
 module.exports = {
   db,
   getCatalog,
+  getPriceHint,
+  setPricingRules,
+  setBanned,
+  adminAdjustBalance,
+  listOrdersAdmin,
+  listRecentTransactions,
+  upsertRegion,
+  upsertCity,
+  upsertService,
+  setCityService,
+  listPlaces,
+  addPlace,
+  deletePlace,
+  countReach,
+  getReminderCandidates,
+  markReminded,
+  listPortfolio,
+  addPortfolioItem,
+  deletePortfolioItem,
+  setBio,
+  getExecutorProfile,
+  getDemandAnalytics,
+  getExecutorBadges,
+  listVerificationRequests,
+  hasActiveVerification,
+  countPendingVerifications,
+  createVerificationRequest,
+  listPendingVerificationRequests,
+  decideVerificationRequest,
+  getPricingRule,
+  setPricingRule,
+  listPricingRules,
   getCity,
   listOrders,
   listOpenOrders,

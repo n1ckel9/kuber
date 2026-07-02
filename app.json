@@ -13,11 +13,20 @@
     ],
     "plugins": [
       "expo-notifications",
-      "expo-font"
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Кубер использует галерею для загрузки фото работ и документов для верификации."
+        }
+      ]
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "ru.vodovoz.services"
+      "bundleIdentifier": "ru.vodovoz.services",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "Кубер использует галерею для загрузки фото работ и документов для верификации."
+      }
     },
     "android": {
       "package": "ru.vodovoz.services"

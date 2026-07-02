@@ -9,7 +9,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://abstracts-into-widely-aquarium.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://kuber-api-nod2.onrender.com"
       }
     },
     "development": {
@@ -18,7 +18,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://abstracts-into-widely-aquarium.trycloudflare.com"
+        "EXPO_PUBLIC_API_URL": "https://kuber-api-nod2.onrender.com"
       }
     },
     "production": {

@@ -15,8 +15,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      # Админы (через запятую), монетизация — при необходимости:
-      # - key: ADMIN_EMAILS
-      #   value: "you@gmail.com"
-      # - key: BID_FEE
-      #   value: "0"
+      - key: ADMIN_EMAILS
+        value: "gribioprime2@gmail.com"
+      # Напоминания заказчикам (0 — выключить):
+      - key: REMINDERS_ENABLED
+        value: "1"

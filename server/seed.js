@@ -51,57 +51,42 @@ const cities = [
   }
 ];
 
+// Категории группируют услуги в интерфейсе (вкладки при выборе, разделы в профиле).
+// Ключи категорий должны совпадать с полем category у услуг ниже.
+const categories = [
+  { key: "transport", title: "Доставка и вывоз", sort: 1 },
+  { key: "equipment", title: "Спецтехника", sort: 2 },
+  { key: "utilities", title: "Сантехника и вода", sort: 3 },
+  { key: "electric", title: "Электрика и монтаж", sort: 4 }
+];
+
 const services = [
-  {
-    key: "water",
-    title: "Водовоз",
-    subtitle: "Питьевая и тех. вода",
-    icon: "tanker-truck",
-    accent: "#1683A7",
-    sort: 1
-  },
-  {
-    key: "septic",
-    title: "Ассенизатор",
-    subtitle: "Септик, выгребная яма",
-    icon: "truck-cargo-container",
-    accent: "#6E7C45",
-    sort: 2
-  },
-  {
-    key: "dump",
-    title: "КамАЗ",
-    subtitle: "Песок, щебень, вывоз",
-    icon: "dump-truck",
-    accent: "#C1642E",
-    sort: 3
-  },
-  {
-    key: "crane",
-    title: "Манипулятор",
-    subtitle: "Погрузка и доставка",
-    icon: "crane",
-    accent: "#7354A8",
-    sort: 4
-  },
-  {
-    key: "tractor",
-    title: "Спецтехника",
-    subtitle: "Трактор, экскаватор",
-    icon: "excavator",
-    accent: "#B8942E",
-    sort: 5
-  }
+  // Доставка и вывоз
+  { key: "water", title: "Водовоз", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "transport", sort: 1 },
+  { key: "dump", title: "КамАЗ", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "transport", sort: 2 },
+  { key: "transport", title: "Перевозки", subtitle: "Грузовики, фургоны", icon: "truck", accent: "#556B8C", category: "transport", sort: 3 },
+  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "transport", sort: 4 },
+  // Спецтехника
+  { key: "crane", title: "Манипулятор", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "equipment", sort: 5 },
+  { key: "tractor", title: "Спецтехника", subtitle: "Трактор, экскаватор", icon: "excavator", accent: "#B8942E", category: "equipment", sort: 6 },
+  // Сантехника и вода
+  { key: "septic", title: "Ассенизатор", subtitle: "Септик, выгребная яма", icon: "truck-cargo-container", accent: "#6E7C45", category: "utilities", sort: 7 },
+  { key: "plumber", title: "Сантехник", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "utilities", sort: 8 },
+  // Электрика и монтаж
+  { key: "electrician", title: "Электрик", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "electric", sort: 9 },
+  { key: "welder", title: "Сварщик", subtitle: "Металлоконструкции", icon: "fire", accent: "#C7503A", category: "electric", sort: 10 },
+  { key: "lowvoltage", title: "Слаботочник", subtitle: "Сети, видеонаблюдение", icon: "ethernet-cable", accent: "#0E8A9C", category: "electric", sort: 11 }
 ];
 
 // Какие услуги доступны в каждом городе. Якутск — полный набор,
 // остальные показывают, что список услуг гибко настраивается по городам.
+const allKeys = services.map((s) => s.key);
 const cityServices = {
-  yakutsk: ["water", "septic", "dump", "crane", "tractor"],
-  mirny: ["water", "dump", "crane"],
-  kazan: ["water", "septic", "dump", "crane", "tractor"],
-  chelny: ["water", "dump", "crane"],
-  novosibirsk: ["water", "septic", "dump", "tractor"]
+  yakutsk: allKeys,
+  mirny: ["water", "dump", "crane", "loader", "electrician"],
+  kazan: allKeys,
+  chelny: ["water", "dump", "crane", "transport", "loader", "plumber", "electrician"],
+  novosibirsk: ["water", "septic", "dump", "tractor", "transport", "electrician", "plumber"]
 };
 
 const orders = [
@@ -146,4 +131,4 @@ const orders = [
   }
 ];
 
-module.exports = { regions, cities, services, cityServices, orders };
+module.exports = { regions, cities, services, categories, cityServices, orders };

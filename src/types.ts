@@ -29,6 +29,13 @@ export type Service = {
   subtitle: string;
   icon: keyof typeof MaterialCommunityIcons.glyphMap;
   accent: string;
+  category?: string;
+};
+
+// Категория группирует услуги в интерфейсе (вкладки/разделы).
+export type Category = {
+  key: string;
+  title: string;
 };
 
 // Полный справочник, который отдаёт сервер на старте приложения.
@@ -36,6 +43,7 @@ export type Catalog = {
   regions: Region[];
   cities: City[];
   services: Service[];
+  categories?: Category[];
 };
 
 export type Account = {
@@ -56,6 +64,74 @@ export type Account = {
   verifyStatus?: "none" | "pending" | "verified" | "rejected";
   isAdmin?: boolean;
   services?: ServiceKey[];
+  bio?: string;
+  banned?: boolean;
+  verificationBadges?: VerificationBadge[];
+};
+
+// Подтверждённая квалификация исполнителя по услуге (напр. сварщик → НАКС).
+export type VerificationBadge = {
+  serviceKey: ServiceKey;
+  docType: string;
+};
+
+export type VerificationRequest = {
+  id: string;
+  accountId: string;
+  serviceKey: ServiceKey;
+  docType: string;
+  photo: string;
+  status: "pending" | "verified" | "rejected";
+  createdAt: number;
+  decidedAt?: number;
+};
+
+// Заявка на модерации (для админа): с данными исполнителя и фото документа.
+export type PendingVerificationRequest = {
+  id: string;
+  accountId: string;
+  accountName: string;
+  accountEmail: string;
+  accountPhone: string;
+  serviceKey: ServiceKey;
+  docType: string;
+  photo: string;
+  status: "pending";
+  createdAt: number;
+};
+
+// Строка сетки цен (город × услуга) для админ-грида.
+export type PricingCell = {
+  cityId: string;
+  cityName: string;
+  serviceKey: ServiceKey;
+  serviceName: string;
+  coinCost: number;
+  enabled: boolean;
+};
+
+export type PortfolioItem = {
+  id: string;
+  title: string;
+  description: string;
+  photoUrl: string;
+  createdAt: number;
+};
+
+export type ExecutorReview = {
+  id: string;
+  rating: number;
+  text: string;
+  createdAt: number;
+  author: string;
+};
+
+// Публичный профиль исполнителя (для заказчика при выборе).
+export type ExecutorProfile = Account & {
+  bio: string;
+  portfolio: PortfolioItem[];
+  reviews: ExecutorReview[];
+  jobsCompleted: number;
 };
 
 export type Transaction = {
@@ -91,6 +167,15 @@ export type Schedule = {
   intervalDays: number;
   nextRun: number;
   active: boolean;
+};
+
+export type SavedPlace = {
+  id: string;
+  label: string;
+  fromText: string;
+  lng: number;
+  lat: number;
+  createdAt: number;
 };
 
 export type Message = {
@@ -140,7 +225,11 @@ export type Bid = {
   price: number;
   eta: string;
   rating: number;
+  ratingCount?: number;
+  jobsCompleted?: number;
   verified?: boolean;
+  // профессия подтверждена документом для услуги этого заказа
+  verifiedService?: boolean;
 };
 
 export type Order = {
@@ -160,4 +249,5 @@ export type Order = {
   customer?: Contact | null;
   executor?: Contact | null;
   bids: Bid[];
+  reach?: number;
 };

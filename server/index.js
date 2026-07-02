@@ -17,7 +17,8 @@ const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS || "")
 
 const app = express();
 
-app.use(express.json());
+// Лимит поднят до 8mb: фото документов/работ приходят как base64 data-URL в JSON.
+app.use(express.json({ limit: "8mb" }));
 app.set("trust proxy", true);
 
 // CORS. По умолчанию * (dev); в проде задать CORS_ORIGIN=https://your.app
@@ -71,6 +72,16 @@ setInterval(() => {
 
 function makeId(prefix) {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+// Проверка фото-строки: base64 data-URL картинки, разумного размера (до ~6 МБ base64).
+function isValidPhoto(value) {
+  return (
+    typeof value === "string" &&
+    value.startsWith("data:image/") &&
+    value.length > 100 &&
+    value.length < 6 * 1024 * 1024
+  );
 }
 
 function normalizePhone(input) {
@@ -129,6 +140,9 @@ function requireAuth(req, res, next) {
   if (!account) {
     return res.status(401).json({ error: "unauthorized" });
   }
+  if (account.banned) {
+    return res.status(403).json({ error: "forbidden_banned", message: "Аккаунт заблокирован" });
+  }
   req.account = withAdmin(account);
   next();
 }
@@ -173,18 +187,33 @@ function effectiveConfig() {
   };
 }
 
-// Стоимость отклика на конкретный заказ: фикс + процент от цены заказа.
-function bidCost(orderPrice) {
+// Стоимость отклика в монетах. Приоритет — нишевая цена (город × услуга);
+// если для ниши плата не включена, используется глобальный dev-тариф (fallback).
+// Принимает объект заказа {cityId, service, price} или число (обратная совместимость).
+function bidCost(order) {
+  if (typeof order === "number") {
+    const cfg = effectiveConfig();
+    return cfg.bidFee + Math.round((order * cfg.bidPercent) / 100);
+  }
+  const rule = repo.getPricingRule(order.cityId, order.service);
+  if (rule && rule.enabled) {
+    return Math.max(0, rule.coin_cost);
+  }
   const cfg = effectiveConfig();
-  return cfg.bidFee + Math.round((orderPrice * cfg.bidPercent) / 100);
+  return cfg.bidFee + Math.round(((order.price || 0) * cfg.bidPercent) / 100);
+}
+
+// Приводит строку заказа (snake_case) к объекту для bidCost.
+function orderRowForCost(row) {
+  return { cityId: row.city_id, service: row.service, price: row.price };
 }
 
 // Возврат платы за отклик исполнителю (при отклонении/удалении/проигрыше).
-function refundBidFee(driverId, orderPrice, orderId) {
+function refundBidFee(driverId, order, orderId) {
   if (!driverId) {
     return;
   }
-  const fee = bidCost(orderPrice);
+  const fee = bidCost(order);
   if (fee <= 0) {
     return;
   }
@@ -195,12 +224,17 @@ function refundBidFee(driverId, orderPrice, orderId) {
     note: `Возврат за отклик #${orderId}`,
     createdAt: Date.now()
   });
-  notify(driverId, "refund", `Возврат ${fee} ₽ за отклик`, orderId);
+  notify(driverId, "refund", `Возврат ${fee} монет за отклик`, orderId);
 }
 
-// Публичный конфиг для клиента (цена отклика и т.п.).
+// Публичный конфиг для клиента: глобальный тариф + включённые нишевые цены.
 app.get("/api/config", (req, res) => {
-  res.json(effectiveConfig());
+  const rules = repo.listPricingRules().filter((r) => r.enabled);
+  res.json({
+    ...effectiveConfig(),
+    // компактно: c=cityId, s=serviceKey, p=coinCost
+    pricingRules: rules.map((r) => ({ c: r.cityId, s: r.serviceKey, p: r.coinCost }))
+  });
 });
 
 // Изменение конфигурации монетизации (dev). Доступно любому авторизованному —
@@ -239,6 +273,17 @@ app.get("/api/services", (req, res) => {
     return res.status(404).json({ error: "city_not_found" });
   }
   res.json(services.filter((service) => city.services.includes(service.key)));
+});
+
+// Подсказка цены по нише (город × услуга) — публично, для формы заявки.
+app.get("/api/price-hint", (req, res) => {
+  const cityId = String(req.query.cityId || "");
+  const service = String(req.query.service || "");
+  if (!cityId || !service) {
+    return res.status(400).json({ error: "missing_params" });
+  }
+  const hint = repo.getPriceHint(cityId, service);
+  res.json(hint || { count: 0 });
 });
 
 // --- Авторизация ------------------------------------------------------------
@@ -405,6 +450,57 @@ app.patch("/api/account", requireAuth, (req, res) => {
   );
 });
 
+// --- Портфолио исполнителя --------------------------------------------------
+
+// Обновление своего портфолио: био и/или добавление/удаление примера работы.
+app.patch("/api/account/portfolio", requireAuth, (req, res) => {
+  const body = req.body ?? {};
+  if (typeof body.bio === "string") {
+    repo.setBio(req.account.id, body.bio.trim().slice(0, 600));
+  }
+  if (body.addItem) {
+    const title = String(body.addItem.title || "").trim().slice(0, 120);
+    if (!title) {
+      return res.status(400).json({ error: "invalid_item", message: "Укажите название работы" });
+    }
+    // photoUrl может быть внешней ссылкой (короткой) или загруженным фото (base64 data-URL).
+    const rawPhoto = String(body.addItem.photoUrl || "").trim();
+    let photoUrl = "";
+    if (rawPhoto.startsWith("data:")) {
+      if (!isValidPhoto(rawPhoto)) {
+        return res.status(400).json({ error: "invalid_photo", message: "Фото слишком большое (до 6 МБ)" });
+      }
+      photoUrl = rawPhoto;
+    } else {
+      photoUrl = rawPhoto.slice(0, 1000);
+    }
+    const result = repo.addPortfolioItem({
+      id: makeId("pf_"),
+      accountId: req.account.id,
+      title,
+      description: String(body.addItem.description || "").trim().slice(0, 600),
+      photoUrl,
+      createdAt: Date.now()
+    });
+    if (!result.ok) {
+      return res.status(400).json({ error: "too_many_items", message: "Максимум 30 работ" });
+    }
+  }
+  if (body.deleteItemId) {
+    repo.deletePortfolioItem(req.account.id, String(body.deleteItemId));
+  }
+  res.json(repo.getExecutorProfile(req.account.id));
+});
+
+// Публичный профиль исполнителя (портфолио, отзывы, рейтинг) — для заказчика.
+app.get("/api/executors/:id", requireAuth, (req, res) => {
+  const profile = repo.getExecutorProfile(req.params.id);
+  if (!profile) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  res.json(profile);
+});
+
 // --- Заказы и ставки --------------------------------------------------------
 
 // Геокодирование адреса в координаты (для предпросмотра точки на карте).
@@ -456,17 +552,67 @@ app.get("/api/orders/bourse", requireAuth, (req, res) => {
   res.json(repo.listBourse(req.account.cityId, req.account.services || []));
 });
 
+// Охват открытого заказа: сколько исполнителей поблизости его видят (для заказчика).
+app.get("/api/orders/:orderId/reach", requireAuth, (req, res) => {
+  const order = repo.getOrder(req.params.orderId);
+  if (!order) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  if (order.customerId !== req.account.id) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  res.json({ reach: repo.countReach(order.cityId, order.service) });
+});
+
 // Статистика исполнителя (заработок, число выполненных).
 app.get("/api/stats", requireAuth, (req, res) => {
   res.json(repo.getExecutorStats(req.account.id));
 });
 
-// Исполнитель запрашивает верификацию → уходит на модерацию админу.
+// Исполнитель запрашивает верификацию → уходит на модерацию админу (легаси, общий значок).
 app.post("/api/account/verify", requireAuth, (req, res) => {
   res.json(withAdmin(repo.requestVerification(req.account.id)));
 });
 
+// Заявка на верификацию по услуге с документом (напр. сварщик → НАКС).
+app.post("/api/account/verification-request", requireAuth, (req, res) => {
+  if (req.account.role !== "driver") {
+    return res.status(403).json({ error: "drivers_only", message: "Только для исполнителей" });
+  }
+  const body = req.body ?? {};
+  const serviceKey = String(body.serviceKey || "").trim();
+  const docType = String(body.docType || "").trim().slice(0, 60);
+  const photo = String(body.photo || "");
+  if (!serviceKey || !docType) {
+    return res.status(400).json({ error: "missing_fields", message: "Укажите услугу и тип документа" });
+  }
+  if (!isValidPhoto(photo)) {
+    return res.status(400).json({ error: "invalid_photo", message: "Приложите фото документа (до 6 МБ)" });
+  }
+  if (repo.countPendingVerifications(req.account.id) >= 5) {
+    return res.status(429).json({ error: "too_many_pending", message: "Слишком много заявок на проверке" });
+  }
+  if (repo.hasActiveVerification(req.account.id, serviceKey)) {
+    return res.status(409).json({ error: "already_exists", message: "По этой услуге уже есть заявка или подтверждение" });
+  }
+  const created = repo.createVerificationRequest({
+    id: makeId("vr_"),
+    accountId: req.account.id,
+    serviceKey,
+    docType,
+    photo,
+    createdAt: Date.now()
+  });
+  res.status(201).json(created);
+});
+
+// Свои заявки на верификацию (без тяжёлого фото).
+app.get("/api/account/verification-requests", requireAuth, (req, res) => {
+  res.json(repo.listVerificationRequests(req.account.id));
+});
+
 // --- Админ: модерация ---
+// Легаси: общий значок.
 app.get("/api/admin/verifications", requireAuth, requireAdmin, (req, res) => {
   res.json(repo.listPendingVerifications());
 });
@@ -484,8 +630,251 @@ app.post("/api/admin/verifications/:id", requireAuth, requireAdmin, (req, res) =
   res.json(account);
 });
 
+// Заявки на верификацию по документу — на модерации (с фото).
+app.get("/api/admin/verification-requests", requireAuth, requireAdmin, (req, res) => {
+  res.json(repo.listPendingVerificationRequests());
+});
+
+app.post("/api/admin/verification-requests/:id", requireAuth, requireAdmin, (req, res) => {
+  const approve = Boolean(req.body?.approve);
+  const vr = repo.decideVerificationRequest(req.params.id, approve);
+  if (!vr) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  notify(
+    vr.accountId,
+    "verify",
+    approve
+      ? `Квалификация подтверждена: ${vr.docType} ✓`
+      : `Заявка на верификацию (${vr.docType}) отклонена`,
+    ""
+  );
+  res.json(vr);
+});
+
 app.get("/api/admin/users", requireAuth, requireAdmin, (req, res) => {
-  res.json(repo.listUsers());
+  res.json(
+    repo.listUsers({
+      q: req.query.q ? String(req.query.q) : null,
+      limit: Number(req.query.limit) || 20,
+      offset: Number(req.query.offset) || 0
+    })
+  );
+});
+
+// Аналитика спроса: сколько заказов по каждой услуге и городу за период.
+app.get("/api/admin/analytics", requireAuth, requireAdmin, (req, res) => {
+  const days = Math.max(1, Math.min(365, Math.round(Number(req.query.days) || 30)));
+  const cityId = req.query.cityId ? String(req.query.cityId) : null;
+  const toTime = Date.now();
+  const fromTime = toTime - days * 86400000;
+  const data = repo.getDemandAnalytics(fromTime, toTime, cityId);
+  const catalog = repo.getCatalog();
+  const svc = new Map(catalog.services.map((s) => [s.key, s]));
+  const cityNames = new Map(catalog.cities.map((c) => [c.id, c.name]));
+  const catTitles = new Map((catalog.categories || []).map((c) => [c.key, c.title]));
+
+  const byService = data.byService.map((r) => ({
+    key: r.service,
+    title: svc.get(r.service)?.title || r.service,
+    category: svc.get(r.service)?.category || "other",
+    count: r.count,
+    gmv: r.gmv,
+    avgPrice: r.avgPrice
+  }));
+
+  // Разбивка по категориям (агрегируем услуги).
+  const catAgg = new Map();
+  for (const r of byService) {
+    const e = catAgg.get(r.category) || { key: r.category, title: catTitles.get(r.category) || "Прочее", count: 0, gmv: 0 };
+    e.count += r.count;
+    e.gmv += r.gmv;
+    catAgg.set(r.category, e);
+  }
+  const byCategory = [...catAgg.values()].sort((a, b) => b.gmv - a.gmv);
+
+  res.json({
+    days,
+    cityId,
+    totals: data.totals,
+    byCategory,
+    byService,
+    byCity: data.byCity.map((r) => ({
+      key: r.city_id,
+      title: cityNames.get(r.city_id) || r.city_id,
+      count: r.count,
+      gmv: r.gmv
+    })),
+    matrix: data.matrix.map((r) => ({
+      cityId: r.city_id,
+      cityName: cityNames.get(r.city_id) || r.city_id,
+      serviceKey: r.service,
+      serviceName: svc.get(r.service)?.title || r.service,
+      count: r.count,
+      gmv: r.gmv,
+      fillRate: r.count > 0 ? Math.round((r.done / r.count) * 100) : 0,
+      avgBids: r.count > 0 ? Math.round((r.bidsTotal / r.count) * 10) / 10 : 0,
+      supply: r.supply || 0
+    }))
+  });
+});
+
+// Сетка цен по нишам (город × услуга): полный грид из каталога + текущие правила.
+app.get("/api/admin/pricing", requireAuth, requireAdmin, (req, res) => {
+  const catalog = repo.getCatalog();
+  const rules = new Map(
+    repo.listPricingRules().map((r) => [`${r.cityId}|${r.serviceKey}`, r])
+  );
+  const grid = [];
+  for (const city of catalog.cities) {
+    for (const key of city.services) {
+      const svc = catalog.services.find((s) => s.key === key);
+      if (!svc) continue;
+      const rule = rules.get(`${city.id}|${key}`);
+      grid.push({
+        cityId: city.id,
+        cityName: city.name,
+        serviceKey: key,
+        serviceName: svc.title,
+        coinCost: rule ? rule.coinCost : 0,
+        enabled: rule ? rule.enabled : false
+      });
+    }
+  }
+  res.json({ grid });
+});
+
+// Включить/выключить платную нишу в городе с ценой в монетах.
+app.post("/api/admin/pricing", requireAuth, requireAdmin, (req, res) => {
+  const body = req.body ?? {};
+  const cityId = String(body.cityId || "");
+  const serviceKey = String(body.serviceKey || "");
+  const coinCost = Math.max(0, Math.round(Number(body.coinCost) || 0));
+  const enabled = Boolean(body.enabled);
+  if (!repo.getCity(cityId)) {
+    return res.status(400).json({ error: "invalid_city" });
+  }
+  repo.setPricingRule(cityId, serviceKey, coinCost, enabled);
+  res.json({ ok: true, cityId, serviceKey, coinCost, enabled });
+});
+
+// Массовое обновление цен (услуга во все города / копирование / выключить всё).
+app.post("/api/admin/pricing/bulk", requireAuth, requireAdmin, (req, res) => {
+  const rules = Array.isArray(req.body?.rules) ? req.body.rules : [];
+  if (rules.length === 0) {
+    return res.status(400).json({ error: "no_rules" });
+  }
+  const cities = new Set(repo.getCatalog().cities.map((c) => c.id));
+  const clean = rules
+    .filter((r) => r && cities.has(String(r.cityId)) && r.serviceKey)
+    .map((r) => ({
+      cityId: String(r.cityId),
+      serviceKey: String(r.serviceKey),
+      coinCost: Math.max(0, Math.round(Number(r.coinCost) || 0)),
+      enabled: Boolean(r.enabled)
+    }));
+  repo.setPricingRules(clean);
+  res.json({ ok: true, count: clean.length });
+});
+
+// Корректировка баланса пользователя админом.
+app.post("/api/admin/users/:id/balance", requireAuth, requireAdmin, (req, res) => {
+  const amount = Math.round(Number(req.body?.amount) || 0);
+  const note = String(req.body?.note || "").trim().slice(0, 200);
+  if (!amount) {
+    return res.status(400).json({ error: "invalid_amount" });
+  }
+  if (!repo.getAccount(req.params.id)) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  repo.adminAdjustBalance(req.params.id, amount, note);
+  notify(
+    req.params.id,
+    "balance",
+    amount > 0 ? `Начислено ${amount} монет` : `Списано ${Math.abs(amount)} монет`,
+    ""
+  );
+  res.json({ ok: true, balance: repo.getWallet(req.params.id).balance });
+});
+
+// Бан/разбан пользователя.
+app.post("/api/admin/users/:id/ban", requireAuth, requireAdmin, (req, res) => {
+  if (!repo.getAccount(req.params.id)) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  const banned = Boolean(req.body?.banned);
+  repo.setBanned(req.params.id, banned);
+  res.json({ ok: true, banned });
+});
+
+// Лента заказов (модерация): фильтр по городу и статусу.
+app.get("/api/admin/orders", requireAuth, requireAdmin, (req, res) => {
+  res.json(
+    repo.listOrdersAdmin({
+      cityId: req.query.cityId ? String(req.query.cityId) : null,
+      status: req.query.status ? String(req.query.status) : null,
+      limit: Number(req.query.limit) || 20,
+      offset: Number(req.query.offset) || 0
+    })
+  );
+});
+
+// Лог последних транзакций платформы.
+app.get("/api/admin/transactions", requireAuth, requireAdmin, (req, res) => {
+  res.json({
+    transactions: repo.listRecentTransactions(Number(req.query.limit) || 20, Number(req.query.offset) || 0)
+  });
+});
+
+// --- Админ: управление каталогом (города, услуги, доступность) ---
+app.post("/api/admin/cities", requireAuth, requireAdmin, (req, res) => {
+  const b = req.body ?? {};
+  const id = String(b.id || "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+  const regionId = String(b.regionId || "").trim();
+  const name = String(b.name || "").trim().slice(0, 100);
+  const centerLng = Number(b.centerLng);
+  const centerLat = Number(b.centerLat);
+  if (!id || !regionId || !name || !Number.isFinite(centerLng) || !Number.isFinite(centerLat)) {
+    return res.status(400).json({ error: "invalid_city", message: "Заполните id, регион, название и координаты" });
+  }
+  try {
+    repo.upsertCity(id, regionId, name, centerLng, centerLat, Number(b.zoom) || 11, Number(b.sort) || 0);
+    res.json({ ok: true, id });
+  } catch (e) {
+    res.status(400).json({ error: "city_error", message: e.message === "region_not_found" ? "Регион не найден" : e.message });
+  }
+});
+
+app.post("/api/admin/services", requireAuth, requireAdmin, (req, res) => {
+  const b = req.body ?? {};
+  const key = String(b.key || "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "");
+  const title = String(b.title || "").trim().slice(0, 60);
+  const subtitle = String(b.subtitle || "").trim().slice(0, 120);
+  const icon = String(b.icon || "").trim();
+  const accent = String(b.accent || "").trim();
+  const category = String(b.category || "transport").trim();
+  if (!key || !title || !subtitle || !icon) {
+    return res.status(400).json({ error: "invalid_service", message: "Заполните key, название, подзаголовок, иконку" });
+  }
+  if (!/^#[0-9a-fA-F]{6}$/.test(accent)) {
+    return res.status(400).json({ error: "invalid_accent", message: "Цвет в формате #RRGGBB" });
+  }
+  repo.upsertService(key, title, subtitle, icon, accent, category, Number(b.sort) || 0);
+  res.json({ ok: true, key });
+});
+
+app.post("/api/admin/city-services", requireAuth, requireAdmin, (req, res) => {
+  const cityId = String(req.body?.cityId || "").trim();
+  const serviceKey = String(req.body?.serviceKey || "").trim();
+  if (!cityId || !serviceKey) {
+    return res.status(400).json({ error: "missing_params" });
+  }
+  try {
+    repo.setCityService(cityId, serviceKey, Boolean(req.body?.enabled));
+    res.json({ ok: true, cityId, serviceKey, enabled: Boolean(req.body?.enabled) });
+  } catch (e) {
+    res.status(400).json({ error: "city_service_error", message: e.message });
+  }
 });
 
 // --- Регулярная доставка (расписания) ---
@@ -526,6 +915,37 @@ app.post("/api/schedules", requireAuth, (req, res) => {
 
 app.delete("/api/schedules/:id", requireAuth, (req, res) => {
   repo.deleteSchedule(req.params.id, req.account.id);
+  res.json({ ok: true });
+});
+
+// Сохранённые адреса заказчика («Дом», «Дача»…).
+app.get("/api/places", requireAuth, (req, res) => {
+  res.json(repo.listPlaces(req.account.id));
+});
+
+app.post("/api/places", requireAuth, (req, res) => {
+  const body = req.body ?? {};
+  const label = String(body.label || "").trim().slice(0, 60);
+  const fromText = String(body.fromText || body.from_text || "").trim().slice(0, 300);
+  const lng = Number(body.lng);
+  const lat = Number(body.lat);
+  if (!label || !fromText || !Number.isFinite(lng) || !Number.isFinite(lat)) {
+    return res.status(400).json({ error: "invalid_place", message: "Укажите название и точку на карте" });
+  }
+  const created = repo.addPlace({
+    id: makeId("pl_"),
+    accountId: req.account.id,
+    label,
+    fromText,
+    lng,
+    lat,
+    createdAt: Date.now()
+  });
+  res.status(201).json(created);
+});
+
+app.delete("/api/places/:id", requireAuth, (req, res) => {
+  repo.deletePlace(req.params.id, req.account.id);
   res.json({ ok: true });
 });
 
@@ -620,11 +1040,17 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "invalid_order" });
   }
 
-  // Координаты: либо точка, выбранная клиентом на карте, либо геокодирование
-  // адреса, либо (если ничего не вышло) центр города.
+  // Координаты обязательны: либо точка, выбранная клиентом (карта/подсказка),
+  // либо успешное геокодирование адреса. Если ни то, ни другое — просим уточнить
+  // адрес, чтобы исполнитель не ехал в центр города по «мусорному» вводу.
   let coordinates = null;
-  if (Array.isArray(body.coordinates) && body.coordinates.length === 2) {
-    coordinates = body.coordinates;
+  if (
+    Array.isArray(body.coordinates) &&
+    body.coordinates.length === 2 &&
+    Number.isFinite(Number(body.coordinates[0])) &&
+    Number.isFinite(Number(body.coordinates[1]))
+  ) {
+    coordinates = [Number(body.coordinates[0]), Number(body.coordinates[1])];
   } else {
     const geo = await geocodeAddress(fromText, city.name);
     if (geo) {
@@ -632,7 +1058,10 @@ app.post("/api/orders", requireAuth, async (req, res) => {
     }
   }
   if (!coordinates) {
-    coordinates = [city.center_lng, city.center_lat];
+    return res.status(400).json({
+      error: "address_not_found",
+      message: "Не удалось определить адрес. Выберите точку на карте или подсказку из списка."
+    });
   }
 
   const distanceKm = haversineKm([city.center_lng, city.center_lat], coordinates);
@@ -673,8 +1102,8 @@ app.post("/api/orders/:orderId/bids", requireAuth, (req, res) => {
     return res.status(409).json({ error: "already_bid", message: "Вы уже откликнулись на этот заказ" });
   }
 
-  // Плата за отклик (если включена монетизация): фикс + % от суммы заказа.
-  const fee = bidCost(order.price);
+  // Плата за отклик в монетах: нишевая цена (город × услуга), иначе бесплатно.
+  const fee = bidCost(order);
   if (fee > 0) {
     const charge = repo.chargeForBid(req.account.id, {
       id: makeId("t_"),
@@ -685,7 +1114,7 @@ app.post("/api/orders/:orderId/bids", requireAuth, (req, res) => {
     if (!charge.ok) {
       return res.status(402).json({
         error: "insufficient_funds",
-        message: `Недостаточно средств: отклик стоит ${fee} ₽. Пополните баланс.`
+        message: `Недостаточно монет: отклик стоит ${fee}. Пополните баланс.`
       });
     }
   }
@@ -723,7 +1152,7 @@ app.post("/api/orders/:orderId/accept", requireAuth, (req, res) => {
   // Возврат платы тем, кого не выбрали.
   for (const bid of before?.bids ?? []) {
     if (bid.driverId && bid.driverId !== acceptedDriverId) {
-      refundBidFee(bid.driverId, order.price, updated.id);
+      refundBidFee(bid.driverId, orderRowForCost(order), updated.id);
     }
   }
   notify(updated.executor?.id, "accepted", "Ваш отклик принят — приступайте к заказу", updated.id);
@@ -744,7 +1173,7 @@ app.delete("/api/orders/:orderId/bids/:bidId", requireAuth, (req, res) => {
   const updated = repo.deleteBid(req.params.orderId, req.params.bidId);
   if (rejected?.driverId) {
     notify(rejected.driverId, "rejected", "Ваш отклик отклонён заказчиком", req.params.orderId);
-    refundBidFee(rejected.driverId, order.price, req.params.orderId);
+    refundBidFee(rejected.driverId, orderRowForCost(order), req.params.orderId);
   }
   res.json(updated);
 });
@@ -802,7 +1231,7 @@ app.delete("/api/orders/:orderId", requireAuth, (req, res) => {
   // Возврат платы откликнувшимся исполнителям перед удалением.
   const full = repo.getOrder(req.params.orderId);
   for (const bid of full?.bids ?? []) {
-    refundBidFee(bid.driverId, order.price, req.params.orderId);
+    refundBidFee(bid.driverId, orderRowForCost(order), req.params.orderId);
   }
   repo.deleteOrder(req.params.orderId);
   res.json({ ok: true });
@@ -928,7 +1357,40 @@ function runSchedules() {
 
 setInterval(runSchedules, 60000);
 
+// Напоминания по циклу потребления. Заказчику, у которого последний выполненный
+// заказ по нише старше REMIND_DAYS и нет активного расписания/открытого заказа,
+// шлём один пуш «пора повторить». Дедуп через accounts.last_reminded_at.
+const REMIND_DAYS = Math.max(1, Number(process.env.REMIND_DAYS || 10));
+const REMINDERS_ENABLED = process.env.REMINDERS_ENABLED !== "0"; // по умолчанию включено
+let remindersBusy = false;
+function runReminders() {
+  if (!REMINDERS_ENABLED || remindersBusy) {
+    return;
+  }
+  remindersBusy = true;
+  try {
+    const cutoff = Date.now() - REMIND_DAYS * 86400000;
+    const seen = new Set();
+    for (const c of repo.getReminderCandidates(cutoff)) {
+      if (seen.has(c.accountId)) {
+        continue; // одному заказчику — не больше одного напоминания за проход
+      }
+      seen.add(c.accountId);
+      notify(c.accountId, "reminder", "Пора повторить заказ? Откройте приложение и закажите снова.", "");
+      repo.markReminded(c.accountId, Date.now());
+    }
+  } catch (e) {
+    console.error("runReminders error:", e.message);
+  } finally {
+    remindersBusy = false;
+  }
+}
+
+// Раз в час — срочность не критична.
+setInterval(runReminders, 3600000);
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Vodovoz API is running on http://0.0.0.0:${PORT}`);
   runSchedules();
+  runReminders();
 });
