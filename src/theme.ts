@@ -15,7 +15,13 @@ export const colors = {
   positive: "#3F6B3A",
   positiveBg: "#EAF0E6",
   warning: "#9A5A2B",
-  warningBg: "#F4EAE0"
+  warningBg: "#F4EAE0",
+  // Акценты для повторяющихся значков (вынесены из разбросанного хардкода).
+  verified: "#2E7D5B",
+  star: "#E0A93B",
+  favorite: "#C7503A",
+  coinBg: "#E7B54B",
+  coinText: "#5C3D0E"
 };
 
 export const radius = 14;

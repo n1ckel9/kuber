@@ -4,6 +4,7 @@ import {
   AuthResponse,
   Bid,
   Catalog,
+  Complaint,
   ExecutorProfile,
   LoginPayload,
   Message,
@@ -98,10 +99,10 @@ export async function requestOtp(phone: string) {
   });
 }
 
-export async function verifyOtp(phone: string, code: string) {
+export async function verifyOtp(phone: string, code: string, referralCode?: string) {
   return request<AuthResponse>("/api/auth/verify-otp", {
     method: "POST",
-    body: JSON.stringify({ phone, code })
+    body: JSON.stringify({ phone, code, ...(referralCode ? { referralCode } : {}) })
   });
 }
 
@@ -566,8 +567,9 @@ export async function fetchWallet() {
   return request<Wallet>("/api/wallet");
 }
 
+// amount — монеты. Возвращает Wallet (dev) ЛИБО { confirmationUrl } (ЮKassa).
 export async function topUpWallet(amount: number) {
-  return request<Wallet>("/api/wallet/topup", {
+  return request<Wallet & { confirmationUrl?: string }>("/api/wallet/topup", {
     method: "POST",
     body: JSON.stringify({ amount })
   });
@@ -579,6 +581,68 @@ export async function deleteOrder(orderId: string) {
 
 export async function finishOrder(orderId: string) {
   return request<Order>(`/api/orders/${orderId}/finish`, { method: "POST", body: "{}" });
+}
+
+export async function cancelOrder(orderId: string, reason: string) {
+  return request<Order>(`/api/orders/${orderId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ reason })
+  });
+}
+
+export async function setOrderEnroute(orderId: string) {
+  return request<Order>(`/api/orders/${orderId}/enroute`, { method: "POST", body: "{}" });
+}
+
+export async function sendExecutorLocation(orderId: string, lng: number, lat: number) {
+  return request<{ ok: boolean }>(`/api/orders/${orderId}/location`, {
+    method: "POST",
+    body: JSON.stringify({ lng, lat })
+  });
+}
+
+export async function reviewCustomer(orderId: string, rating: number, text: string) {
+  return request<Order>(`/api/orders/${orderId}/review-customer`, {
+    method: "POST",
+    body: JSON.stringify({ rating, text })
+  });
+}
+
+export async function createComplaint(orderId: string, type: string, text: string) {
+  return request<{ id: string }>("/api/complaints", {
+    method: "POST",
+    body: JSON.stringify({ orderId, type, text })
+  });
+}
+
+export async function fetchReferralCode() {
+  try {
+    return await request<{ code: string; count: number }>("/api/referral-code");
+  } catch {
+    return { code: "", count: 0 };
+  }
+}
+
+export async function quickOrderFavorite(
+  executorId: string,
+  payload: { cityId: string; service: ServiceKey; from: string; details: string; price: number; coordinates?: [number, number] }
+) {
+  return request<Order>(`/api/favorites/${executorId}/quick-order`, {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+export async function fetchAdminComplaints(status?: string | null) {
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  return request<Complaint[]>(`/api/admin/complaints${q}`);
+}
+
+export async function decideComplaint(id: string, resolution: string) {
+  return request<{ ok: boolean }>(`/api/admin/complaints/${id}`, {
+    method: "POST",
+    body: JSON.stringify({ resolution })
+  });
 }
 
 export async function confirmOrder(orderId: string) {

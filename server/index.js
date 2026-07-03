@@ -2,8 +2,15 @@ const express = require("express");
 const repo = require("./db");
 const { hashPassword, verifyPassword, createToken } = require("./auth");
 const { geocodeAddress, suggestAddress, reverseGeocode } = require("./geocode");
+const { sendSms, smsEnabled } = require("./sms");
 
 const PORT = Number(process.env.PORT || 4000);
+// Бонус пригласившему за первый выполненный заказ приглашённого (монеты).
+const REFERRAL_BONUS = Math.max(0, Number(process.env.REFERRAL_BONUS || 50));
+// Платежи ЮKassa (пополнение монет). 1 монета = COIN_RATE ₽.
+const COIN_RATE = 10;
+const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID;
+const YOOKASSA_SECRET = process.env.YOOKASSA_SECRET;
 // Монетизация (по умолчанию выключена). Базовые значения из окружения,
 // в dev-режиме переопределяются через настройки в БД (PATCH /api/config).
 const ENV_BID_FEE = Math.max(0, Number(process.env.BID_FEE || 0));
@@ -319,6 +326,12 @@ app.post("/api/auth/register", rateLimit({ windowMs: 60000, max: 10 }), (req, re
     createdAt: Date.now()
   });
 
+  // Реферальный код (если ввёл при регистрации) — привязываем пригласившего.
+  const referralCode = String(body.referralCode || "").trim();
+  if (referralCode) {
+    repo.applyReferralCode(account.id, referralCode);
+  }
+
   // Приветственный бонус на кошелёк (если включён) — чтобы первые отклики были бесплатными.
   let finalAccount = account;
   if (SIGNUP_BONUS > 0) {
@@ -353,18 +366,19 @@ app.post("/api/auth/login", rateLimit({ windowMs: 60000, max: 20 }), (req, res) 
 });
 
 // --- Вход по телефону (одноразовый код) ---
-// ЗАГЛУШКА отправки SMS: код пишется в лог и (в dev) возвращается клиенту.
-// В бою заменить на SMS-провайдера (SMS.ru / Twilio).
-app.post("/api/auth/request-otp", rateLimit({ windowMs: 60000, max: 5 }), (req, res) => {
+// Если задан SMSRU_API_ID — реально шлём SMS и НЕ возвращаем код клиенту.
+// Иначе dev-режим: код в логе + devCode в ответе.
+app.post("/api/auth/request-otp", rateLimit({ windowMs: 60000, max: 5 }), async (req, res) => {
   const phone = normalizePhone(req.body?.phone);
   if (phone.length !== 11) {
     return res.status(400).json({ error: "invalid_phone", message: "Введите корректный номер" });
   }
   const code = String(Math.floor(1000 + Math.random() * 9000));
   repo.setOtp(phone, code, Date.now() + 5 * 60 * 1000);
-  console.log(`OTP для +${phone}: ${code}`);
+  await sendSms(phone, `Кубер: код входа ${code}`);
   const dev = process.env.NODE_ENV !== "production";
-  res.json({ sent: true, ...(dev ? { devCode: code } : {}) });
+  // devCode отдаём только когда реальные SMS выключены.
+  res.json({ sent: true, ...(dev && !smsEnabled ? { devCode: code } : {}) });
 });
 
 app.post("/api/auth/verify-otp", rateLimit({ windowMs: 60000, max: 15 }), (req, res) => {
@@ -398,6 +412,10 @@ app.post("/api/auth/verify-otp", rateLimit({ windowMs: 60000, max: 15 }), (req, 
       cityId: "yakutsk",
       createdAt: Date.now()
     });
+    const referralCode = String(req.body?.referralCode || "").trim();
+    if (referralCode) {
+      repo.applyReferralCode(pub.id, referralCode);
+    }
     if (SIGNUP_BONUS > 0) {
       repo.credit(pub.id, {
         id: makeId("t_"),
@@ -826,6 +844,25 @@ app.get("/api/admin/transactions", requireAuth, requireAdmin, (req, res) => {
   });
 });
 
+// Жалобы на модерации.
+app.get("/api/admin/complaints", requireAuth, requireAdmin, (req, res) => {
+  res.json(
+    repo.listComplaintsAdmin({
+      status: req.query.status ? String(req.query.status) : null,
+      limit: Number(req.query.limit) || 20,
+      offset: Number(req.query.offset) || 0
+    })
+  );
+});
+
+app.post("/api/admin/complaints/:id", requireAuth, requireAdmin, (req, res) => {
+  const c = repo.decideComplaint(req.params.id, String(req.body?.resolution || ""));
+  if (c && c.from_id) {
+    notify(c.from_id, "complaint", "Ваша жалоба рассмотрена", "");
+  }
+  res.json({ ok: true });
+});
+
 // --- Админ: управление каталогом (города, услуги, доступность) ---
 app.post("/api/admin/cities", requireAuth, requireAdmin, (req, res) => {
   const b = req.body ?? {};
@@ -991,19 +1028,70 @@ app.get("/api/wallet", requireAuth, (req, res) => {
 
 // Пополнение баланса. ЗАГЛУШКА: зачисляет мгновенно. Перед боевым запуском —
 // заменить на вебхук платёжного провайдера (ЮKassa/CloudPayments) + чек 54-ФЗ.
-app.post("/api/wallet/topup", requireAuth, (req, res) => {
-  const amount = Math.round(Number(req.body?.amount) || 0);
-  if (amount <= 0 || amount > 100000) {
+// amount — количество монет. Если ЮKassa настроена — создаём платёж и возвращаем
+// confirmation_url (зачисление по вебхуку); иначе мгновенное зачисление (dev).
+app.post("/api/wallet/topup", requireAuth, async (req, res) => {
+  const coins = Math.round(Number(req.body?.amount) || 0);
+  if (coins <= 0 || coins > 100000) {
     return res.status(400).json({ error: "invalid_amount" });
   }
-  repo.credit(req.account.id, {
-    id: makeId("t_"),
-    amount,
-    type: "topup",
-    note: "Пополнение (тест)",
-    createdAt: Date.now()
-  });
-  res.json(repo.getWallet(req.account.id));
+  const amountRub = coins * COIN_RATE;
+
+  if (!YOOKASSA_SHOP_ID || !YOOKASSA_SECRET) {
+    repo.credit(req.account.id, {
+      id: makeId("t_"),
+      amount: coins,
+      type: "topup",
+      note: `Пополнение ${coins} монет (тест)`,
+      createdAt: Date.now()
+    });
+    return res.json(repo.getWallet(req.account.id));
+  }
+
+  try {
+    const paymentId = makeId("pay_");
+    repo.createPayment({ id: paymentId, accountId: req.account.id, amountRub, coins, createdAt: Date.now() });
+    const auth = Buffer.from(`${YOOKASSA_SHOP_ID}:${YOOKASSA_SECRET}`).toString("base64");
+    const yk = await fetch("https://api.yookassa.ru/v3/payments", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${auth}`,
+        "Idempotency-Key": paymentId
+      },
+      body: JSON.stringify({
+        amount: { value: amountRub.toFixed(2), currency: "RUB" },
+        capture: true,
+        confirmation: { type: "redirect", return_url: "https://kuber-api-nod2.onrender.com/payment-done" },
+        description: `Кубер: ${coins} монет`
+      })
+    });
+    if (!yk.ok) {
+      return res.status(400).json({ error: "payment_failed", message: "Не удалось создать платёж" });
+    }
+    const payment = await yk.json();
+    repo.setPaymentProvider(paymentId, payment.id);
+    res.json({ confirmationUrl: payment.confirmation.confirmation_url });
+  } catch (e) {
+    res.status(500).json({ error: "server_error", message: e.message });
+  }
+});
+
+// Вебхук ЮKassa: зачисляем монеты по успешной оплате (идемпотентно).
+app.post("/api/payments/yookassa/webhook", (req, res) => {
+  if (!YOOKASSA_SECRET) {
+    return res.status(400).json({ error: "not_configured" });
+  }
+  const event = req.body?.event;
+  const payment = req.body?.object;
+  if (event === "payment.succeeded" && payment?.status === "succeeded" && payment?.id) {
+    const dbPayment = repo.getPaymentByProviderId(payment.id);
+    if (dbPayment && dbPayment.status !== "confirmed") {
+      repo.confirmPayment(payment.id);
+      notify(dbPayment.account_id, "topup", `Баланс пополнен на ${dbPayment.coins} монет`, "");
+    }
+  }
+  res.status(200).json({ ok: true });
 });
 
 // Вывод средств. ЗАГЛУШКА. В бою — выплата на карту/счёт через провайдера.
@@ -1246,7 +1334,7 @@ app.post("/api/orders/:orderId/finish", requireAuth, (req, res) => {
   if (order.executor_id !== req.account.id) {
     return res.status(403).json({ error: "forbidden" });
   }
-  if (order.status !== "matched") {
+  if (order.status !== "matched" && order.status !== "enroute") {
     return res.status(400).json({ error: "not_in_progress" });
   }
   const updated = repo.finishOrder(req.params.orderId);
@@ -1268,6 +1356,11 @@ app.post("/api/orders/:orderId/confirm", requireAuth, (req, res) => {
   }
   const updated = repo.confirmOrder(req.params.orderId);
   notify(order.executor_id, "confirmed", "Заказчик подтвердил выполнение заказа", order.id);
+  // Реферальный бонус пригласившему, если это первый выполненный заказ заказчика.
+  const award = repo.awardReferralOnFirstDone(order.customer_id, REFERRAL_BONUS);
+  if (award && award.bonus > 0) {
+    notify(award.referrerId, "referral", `Бонус ${award.bonus} монет за приглашённого!`, "");
+  }
   res.json(updated);
 });
 
@@ -1304,6 +1397,176 @@ app.post("/api/orders/:orderId/review", requireAuth, (req, res) => {
   });
   notify(order.executor_id, "review", `Вам поставили оценку ${rating}★`, order.id);
   res.json(reviewed);
+});
+
+// Исполнитель оценивает заказчика (после выполнения).
+app.post("/api/orders/:orderId/review-customer", requireAuth, (req, res) => {
+  const order = repo.getOrderRow(req.params.orderId);
+  if (!order) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  if (order.executor_id !== req.account.id) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  if (order.status !== "done") {
+    return res.status(400).json({ error: "not_done" });
+  }
+  if (order.reviewed_customer) {
+    return res.status(400).json({ error: "already_reviewed" });
+  }
+  const rating = Math.max(1, Math.min(5, Math.round(Number(req.body?.rating) || 0)));
+  if (!rating) {
+    return res.status(400).json({ error: "invalid_rating" });
+  }
+  const updated = repo.addCustomerReview({
+    id: makeId("r_"),
+    orderId: order.id,
+    fromId: req.account.id,
+    toId: order.customer_id,
+    rating,
+    text: String(req.body?.text || "").trim().slice(0, 500),
+    createdAt: Date.now()
+  });
+  notify(order.customer_id, "review", `Исполнитель оценил вас на ${rating}★`, order.id);
+  res.json(updated);
+});
+
+// Отмена заказа заказчиком (open/matched/enroute) или отказ исполнителя (matched/enroute).
+app.post("/api/orders/:orderId/cancel", requireAuth, (req, res) => {
+  const order = repo.getOrderRow(req.params.orderId);
+  if (!order) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  const isCustomer = order.customer_id === req.account.id;
+  const isExecutor = order.executor_id === req.account.id;
+  if (!isCustomer && !isExecutor) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  if (!["open", "matched", "enroute"].includes(order.status)) {
+    return res.status(400).json({ error: "not_cancellable" });
+  }
+  const reason = String(req.body?.reason || "").trim().slice(0, 300);
+  // Возврат платы откликнувшимся исполнителям.
+  const full = repo.getOrder(req.params.orderId);
+  for (const bid of full?.bids ?? []) {
+    refundBidFee(bid.driverId, orderRowForCost(order), req.params.orderId);
+  }
+  const updated = repo.cancelOrder(req.params.orderId, reason);
+  const other = isCustomer ? order.executor_id : order.customer_id;
+  notify(other, "cancelled", isCustomer ? "Заказчик отменил заказ" : "Исполнитель отказался от заказа", order.id);
+  res.json(updated);
+});
+
+// Исполнитель отметил «Выехал» (matched → enroute).
+app.post("/api/orders/:orderId/enroute", requireAuth, (req, res) => {
+  const order = repo.getOrderRow(req.params.orderId);
+  if (!order) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  if (order.executor_id !== req.account.id) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  if (order.status !== "matched") {
+    return res.status(400).json({ error: "not_matched" });
+  }
+  const updated = repo.setEnroute(req.params.orderId);
+  notify(order.customer_id, "enroute", "Исполнитель выехал к вам", order.id);
+  res.json(updated);
+});
+
+// Исполнитель шлёт свою позицию (пока заказ в пути).
+app.post("/api/orders/:orderId/location", requireAuth, (req, res) => {
+  const order = repo.getOrderRow(req.params.orderId);
+  if (!order) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  if (order.executor_id !== req.account.id || order.status !== "enroute") {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  const lng = Number(req.body?.lng);
+  const lat = Number(req.body?.lat);
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+    return res.status(400).json({ error: "invalid_coords" });
+  }
+  repo.setExecPos(req.params.orderId, lng, lat);
+  res.json({ ok: true });
+});
+
+// Жалоба на заказ/вторую сторону.
+app.post("/api/complaints", requireAuth, (req, res) => {
+  const order = repo.getOrderRow(req.body?.orderId);
+  if (!order) {
+    return res.status(404).json({ error: "order_not_found" });
+  }
+  const isCustomer = order.customer_id === req.account.id;
+  const isExecutor = order.executor_id === req.account.id;
+  if (!isCustomer && !isExecutor) {
+    return res.status(403).json({ error: "forbidden" });
+  }
+  const text = String(req.body?.text || "").trim().slice(0, 1000);
+  const type = String(req.body?.type || "other").trim().slice(0, 40);
+  if (!text) {
+    return res.status(400).json({ error: "empty" });
+  }
+  const toId = isCustomer ? order.executor_id : order.customer_id;
+  const created = repo.createComplaint({
+    id: makeId("cmp_"),
+    orderId: order.id,
+    fromId: req.account.id,
+    toId: toId || "",
+    type,
+    text,
+    createdAt: Date.now()
+  });
+  res.status(201).json(created);
+});
+
+// Мой реферальный код + статистика.
+app.get("/api/referral-code", requireAuth, (req, res) => {
+  res.json(repo.getReferralInfo(req.account.id) || { code: "", count: 0 });
+});
+
+// Быстрый повторный вызов избранного исполнителя (создаёт заказ + прямое уведомление).
+app.post("/api/favorites/:executorId/quick-order", requireAuth, async (req, res) => {
+  const executorId = req.params.executorId;
+  if (!repo.listFavorites(req.account.id).includes(executorId)) {
+    return res.status(403).json({ error: "not_favorite" });
+  }
+  const body = req.body ?? {};
+  const city = repo.getCity(body.cityId);
+  const price = Number(body.price);
+  const fromText = String(body.from || "").trim().slice(0, 300);
+  const details = String(body.details || "").trim().slice(0, 2000);
+  if (!city || !fromText || !details || !(price > 0)) {
+    return res.status(400).json({ error: "invalid_order" });
+  }
+  let coordinates = null;
+  if (Array.isArray(body.coordinates) && body.coordinates.length === 2) {
+    coordinates = [Number(body.coordinates[0]), Number(body.coordinates[1])];
+  } else {
+    const geo = await geocodeAddress(fromText, city.name);
+    if (geo) coordinates = [geo.lng, geo.lat];
+  }
+  if (!coordinates) {
+    return res.status(400).json({ error: "address_not_found", message: "Уточните адрес" });
+  }
+  const created = repo.insertOrder({
+    id: makeId("o_"),
+    cityId: city.id,
+    customerId: req.account.id,
+    service: body.service || "water",
+    from: fromText,
+    details,
+    price,
+    distance: formatDistance(haversineKm([city.center_lng, city.center_lat], coordinates)),
+    status: "open",
+    lng: coordinates[0],
+    lat: coordinates[1],
+    customerName: req.account.name,
+    createdAt: Date.now()
+  });
+  notify(executorId, "quick", `${req.account.name} зовёт вас снова — новый заказ`, created.id);
+  res.status(201).json(created);
 });
 
 app.use((req, res) => {

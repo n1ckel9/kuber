@@ -2,11 +2,14 @@
   "expo": {
     "name": "Кубер",
     "slug": "vodovoz-services",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "icon": "./assets/icon.png",
     "splash": {
-      "backgroundColor": "#F7F4EE"
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1A1A1A"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -29,9 +32,15 @@
       }
     },
     "android": {
-      "package": "ru.vodovoz.services"
+      "package": "ru.vodovoz.services",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1A1A1A"
+      }
     },
-    "web": {},
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
     "extra": {
       "eas": {
         "projectId": "ce1bb3b2-d3df-42a6-b0d7-a838eff9cf41"

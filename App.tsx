@@ -7,11 +7,13 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
   RefreshControl,
   ScrollView,
+  Share,
   StyleSheet,
   Switch,
   Text,
@@ -32,11 +34,20 @@ import {
   adminAdjustBalance,
   adminSetBanned,
   adminSetCityService,
+  cancelOrder as cancelOrderOnServer,
+  createComplaint,
   createVerificationRequest,
+  decideComplaint,
   decideVerification,
   decideVerificationRequest,
+  fetchAdminComplaints,
   fetchAdminOrders,
   fetchAdminTransactions,
+  fetchReferralCode,
+  quickOrderFavorite,
+  reviewCustomer,
+  sendExecutorLocation,
+  setOrderEnroute,
   updatePricingBulk,
   deleteOrder as deleteOrderOnServer,
   deleteSchedule as deleteScheduleOnServer,
@@ -98,6 +109,7 @@ import {
   Catalog,
   Category,
   City,
+  Complaint,
   ExecutorProfile,
   Order,
   OrderStatus,
@@ -117,6 +129,8 @@ import {
   Wallet
 } from "./src/types";
 import { pickImageAsBase64 } from "./src/imageUpload";
+import { OnboardingModal } from "./src/OnboardingModal";
+import { LegalScreen } from "./src/LegalScreen";
 
 // Форматирование без Intl (на Hermes/Android Intl ограничен и может падать).
 const rub = {
@@ -176,6 +190,8 @@ export default function App() {
   const [userPos, setUserPos] = useState<[number, number] | null>(null);
   const tabFade = useRef(new Animated.Value(1)).current;
   const tabShift = useRef(new Animated.Value(0)).current;
+  // Защита от повторного запуска операций (двойные нажатия → дубли/списания).
+  const opBusy = useRef<Record<string, boolean>>({});
   const [bidFee, setBidFee] = useState(0);
   const [bidPercent, setBidPercent] = useState(0);
   // Нишевые цены отклика: "cityId|serviceKey" → стоимость в монетах.
@@ -197,6 +213,11 @@ export default function App() {
   const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([]);
   const [savePlaceOpen, setSavePlaceOpen] = useState(false);
   const [savePlaceLabel, setSavePlaceLabel] = useState("");
+  const [onboardingDone, setOnboardingDone] = useState(false);
+  const [confirmState, setConfirmState] = useState<{ title: string; message: string; onYes: () => void } | null>(null);
+  const askConfirm = useCallback((title: string, message: string, onYes: () => void) => {
+    setConfirmState({ title, message, onYes });
+  }, []);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [unread, setUnread] = useState(0);
   const [notifOpen, setNotifOpen] = useState(false);
@@ -231,8 +252,31 @@ export default function App() {
     if (role !== "client" || orders.length === 0) {
       return null;
     }
-    return orders.find((o) => o.status === "done") ?? orders[0];
+    return orders.find((o) => o.status === "done") ?? orders.find((o) => o.status !== "cancelled") ?? null;
   }, [orders, role]);
+
+  // Избранные исполнители с именами (из истории заказов) — для быстрого вызова.
+  const favoriteExecutors = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const o of orders) {
+      if (o.executor?.id && favorites.includes(o.executor.id) && !names.has(o.executor.id)) {
+        names.set(o.executor.id, o.executor.name);
+      }
+    }
+    return favorites.map((id) => ({ id, name: names.get(id) || "Исполнитель" }));
+  }, [orders, favorites]);
+
+  // Сезонная подсказка (Якутск): зима — вода/прогрев, лето — полив/септик.
+  const seasonalHint = useMemo(() => {
+    const m = new Date().getMonth();
+    if (m >= 10 || m <= 2) {
+      return { icon: "snowflake" as const, title: "Зимний сезон", text: "Подвоз воды и прогрев — заказывайте заранее, спрос высокий." };
+    }
+    if (m >= 5 && m <= 7) {
+      return { icon: "water" as const, title: "Летний сезон", text: "Полив, подвоз воды и откачка септика — самое время." };
+    }
+    return null;
+  }, []);
 
   // Исполнителю на бирже: фильтр по рабочему радиусу + сортировка по близости.
   const displayOrders = useMemo(() => {
@@ -342,6 +386,37 @@ export default function App() {
       setSavedPlaces([]);
     }
   }, [account]);
+
+  // Исполнитель «в пути» — периодически шлём координаты (раз в 20с).
+  const myEnrouteId = useMemo(
+    () =>
+      role === "driver" && account
+        ? orders.find((o) => o.status === "enroute" && o.executorId === account.id)?.id ?? ""
+        : "",
+    [role, account, orders]
+  );
+  useEffect(() => {
+    if (!myEnrouteId) {
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      const pos = await getCurrentPosition();
+      if (pos && !cancelled) {
+        try {
+          await sendExecutorLocation(myEnrouteId, pos[0], pos[1]);
+        } catch {
+          // не критично
+        }
+      }
+    };
+    void tick();
+    const timer = setInterval(tick, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [myEnrouteId]);
 
   async function toggleFavorite(executorId: string) {
     if (!executorId) {
@@ -605,9 +680,13 @@ export default function App() {
   async function createOrder(repeatDays = 0) {
     setGeoError("");
     const numericPrice = Number(price.replace(/\D/g, ""));
-    if (!from.trim() || !details.trim() || !numericPrice || !currentCity) {
+    if (!from.trim() || !details.trim() || !currentCity || numericPrice < 1 || numericPrice > 1000000) {
       return;
     }
+    if (opBusy.current.createOrder) {
+      return;
+    }
+    opBusy.current.createOrder = true;
     const payload = {
       cityId,
       service: selectedService,
@@ -640,6 +719,8 @@ export default function App() {
       } else {
         setServerState("offline");
       }
+    } finally {
+      opBusy.current.createOrder = false;
     }
   }
 
@@ -653,6 +734,10 @@ export default function App() {
   }
 
   async function sendBid(orderId: string, bidPrice: number, eta: string) {
+    if (opBusy.current[`bid_${orderId}`]) {
+      return;
+    }
+    opBusy.current[`bid_${orderId}`] = true;
     setBidError("");
     try {
       const target = orders.find((o) => o.id === orderId);
@@ -674,6 +759,8 @@ export default function App() {
       } else {
         setServerState("offline");
       }
+    } finally {
+      opBusy.current[`bid_${orderId}`] = false;
     }
   }
 
@@ -746,6 +833,68 @@ export default function App() {
       setServerState("sync");
     } catch {
       setServerState("offline");
+    }
+  }
+
+  async function submitCustomerReview(orderId: string, rating: number, text: string) {
+    try {
+      updateOrderInList(await reviewCustomer(orderId, rating, text));
+      setServerState("sync");
+    } catch {
+      setServerState("offline");
+    }
+  }
+
+  async function cancelOrder(orderId: string, reason: string) {
+    try {
+      updateOrderInList(await cancelOrderOnServer(orderId, reason));
+      setServerState("sync");
+    } catch {
+      setServerState("offline");
+    }
+  }
+
+  async function markEnroute(orderId: string) {
+    try {
+      updateOrderInList(await setOrderEnroute(orderId));
+      setServerState("sync");
+    } catch {
+      setServerState("offline");
+    }
+  }
+
+  async function submitComplaint(orderId: string, type: string, text: string) {
+    try {
+      await createComplaint(orderId, type, text);
+      setServerState("sync");
+    } catch {
+      setServerState("offline");
+    }
+  }
+
+  // Быстрый повторный вызов избранного исполнителя из последнего заказа.
+  async function quickCall(executorId: string) {
+    const last = orders.find((o) => o.status === "done") ?? orders.find((o) => o.status !== "cancelled");
+    if (!last || !currentCity || opBusy.current[`quick_${executorId}`]) {
+      return;
+    }
+    opBusy.current[`quick_${executorId}`] = true;
+    try {
+      const created = await quickOrderFavorite(executorId, {
+        cityId: last.cityId,
+        service: last.service,
+        from: last.from,
+        details: last.details,
+        price: last.price,
+        coordinates: last.coordinates
+      });
+      setOrders((cur) => [created, ...cur]);
+      setDetailId(created.id);
+      setServerState("sync");
+    } catch {
+      setServerState("offline");
+    } finally {
+      opBusy.current[`quick_${executorId}`] = false;
     }
   }
 
@@ -927,9 +1076,9 @@ export default function App() {
                 onSave={saveProfile}
                 onSaveConfig={saveConfig}
                 onVerify={verify}
-                onLogout={handleLogout}
+                onLogout={() => askConfirm("Выйти из аккаунта?", "Нужно будет войти заново.", handleLogout)}
                 savedPlaces={savedPlaces}
-                onDeletePlace={removeSavedPlace}
+                onDeletePlace={(id) => askConfirm("Удалить место?", "", () => removeSavedPlace(id))}
                 onBalanceChange={(balance) =>
                   setAccount((current) => (current ? { ...current, balance } : current))
                 }
@@ -942,6 +1091,31 @@ export default function App() {
               keyboardShouldPersistTaps="handled"
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={loadOrders} />}
             >
+              {role === "client" && seasonalHint ? (
+                <View style={styles.seasonCard}>
+                  <MaterialCommunityIcons name={seasonalHint.icon} size={22} color={colors.ink} />
+                  <View style={styles.flex}>
+                    <Text style={styles.repeatKicker}>{seasonalHint.title}</Text>
+                    <Text style={styles.panelSubtitle}>{seasonalHint.text}</Text>
+                  </View>
+                </View>
+              ) : null}
+              {role === "client" && favoriteExecutors.length > 0 ? (
+                <View style={ui.card}>
+                  <Text style={ui.label}>Ваши исполнители</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.placeRow}>
+                    {favoriteExecutors.map((f) => (
+                      <View key={f.id} style={styles.favExecChip}>
+                        <MaterialCommunityIcons name="account-heart-outline" size={16} color={colors.ink} />
+                        <Text style={styles.placeChipText} numberOfLines={1}>{f.name}</Text>
+                        <Pressable onPress={() => quickCall(f.id)} hitSlop={6}>
+                          <Text style={styles.favCallText}>Позвать снова</Text>
+                        </Pressable>
+                      </View>
+                    ))}
+                  </ScrollView>
+                </View>
+              ) : null}
               {role === "client" && lastRepeatOrder ? (
                 <RepeatOrderCard order={lastRepeatOrder} onPress={() => repeatOrder(lastRepeatOrder)} />
               ) : null}
@@ -1065,12 +1239,24 @@ export default function App() {
                       onAcceptBid={(bidId) => chooseBid(detailOrder.id, bidId)}
                       onRejectBid={(bidId) => rejectBid(detailOrder.id, bidId)}
                       onSendBid={(p, eta) => sendBid(detailOrder.id, p, eta)}
-                      onDelete={() => removeOrder(detailOrder.id)}
+                      onDelete={() =>
+                        askConfirm(
+                          detailOrder.status === "open" ? "Удалить заявку?" : "Удалить из истории?",
+                          detailOrder.status === "open"
+                            ? "Откликнувшиеся исполнители получат возврат монет."
+                            : "Заказ исчезнет из вашей истории.",
+                          () => removeOrder(detailOrder.id)
+                        )
+                      }
                       onFinish={() => executorFinish(detailOrder.id)}
                       onConfirm={() => clientConfirm(detailOrder.id)}
                       onReview={(rating, text) => submitReview(detailOrder.id, rating, text)}
                       onRepeat={() => repeatOrder(detailOrder)}
                       onOpenExecutor={openExecutor}
+                      onCancel={(reason) => cancelOrder(detailOrder.id, reason)}
+                      onEnroute={() => markEnroute(detailOrder.id)}
+                      onComplaint={(type, text) => submitComplaint(detailOrder.id, type, text)}
+                      onReviewCustomer={(rating, text) => submitCustomerReview(detailOrder.id, rating, text)}
                     />
                   ) : null}
                 </ScrollView>
@@ -1089,6 +1275,51 @@ export default function App() {
               setExecLoading(false);
             }}
           />
+
+          <OnboardingModal
+            visible={
+              role === "client" &&
+              !onboardingDone &&
+              (!account.name || account.name.startsWith("+")) &&
+              savedPlaces.length === 0
+            }
+            account={account}
+            onComplete={() => {
+              setOnboardingDone(true);
+              void fetchMe().then(applyAccount).catch(() => {});
+              void fetchPlaces().then(setSavedPlaces).catch(() => {});
+            }}
+          />
+
+          <Modal
+            visible={Boolean(confirmState)}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setConfirmState(null)}
+          >
+            <View style={styles.centerModalBackdrop}>
+              <View style={styles.centerModalCard}>
+                <Text style={styles.panelTitle}>{confirmState?.title}</Text>
+                {confirmState?.message ? (
+                  <Text style={styles.panelSubtitle}>{confirmState.message}</Text>
+                ) : null}
+                <View style={styles.rowGap}>
+                  <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => setConfirmState(null)}>
+                    <Text style={ui.ghostButtonText}>Отмена</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[ui.primaryButton, styles.flex]}
+                    onPress={() => {
+                      confirmState?.onYes();
+                      setConfirmState(null);
+                    }}
+                  >
+                    <Text style={ui.primaryButtonText}>Подтвердить</Text>
+                  </Pressable>
+                </View>
+              </View>
+            </View>
+          </Modal>
 
           <Modal
             visible={savePlaceOpen}
@@ -1466,9 +1697,9 @@ function CreateOrderPanel({
         />
         {suggestOpen && suggestions.length > 0 ? (
           <View style={styles.suggestBox}>
-            {suggestions.map((item, index) => (
+            {suggestions.slice(0, 8).map((item, index) => (
               <Pressable
-                key={`${item.lat},${item.lng},${index}`}
+                key={`${item.lat},${item.lng}`}
                 style={[styles.suggestRow, index > 0 && styles.suggestDivider]}
                 onPress={() => pickSuggestion(item)}
               >
@@ -1761,11 +1992,11 @@ function ExecutorProfileModal({
                     <View style={styles.bidNameRow}>
                       <Text style={styles.panelTitle}>{profile.name}</Text>
                       {profile.verified ? (
-                        <MaterialCommunityIcons name="check-decagram" size={16} color="#2E7D5B" />
+                        <MaterialCommunityIcons name="check-decagram" size={16} color={colors.verified} />
                       ) : null}
                     </View>
                     <View style={styles.ratingPill}>
-                      <MaterialCommunityIcons name="star" size={15} color="#E0A93B" />
+                      <MaterialCommunityIcons name="star" size={15} color={colors.star} />
                       <Text style={styles.ratingText}>
                         {rating > 0
                           ? `${rating.toFixed(1)} · ${profile.ratingCount} ${plural(profile.ratingCount ?? 0, "отзыв", "отзыва", "отзывов")}`
@@ -1778,7 +2009,7 @@ function ExecutorProfileModal({
                       <MaterialCommunityIcons
                         name={isFav ? "heart" : "heart-outline"}
                         size={22}
-                        color={isFav ? "#C7503A" : colors.inkFaint}
+                        color={isFav ? colors.favorite : colors.inkFaint}
                       />
                     </Pressable>
                   ) : null}
@@ -1906,7 +2137,11 @@ function OrderDetails({
   onConfirm,
   onReview,
   onRepeat,
-  onOpenExecutor
+  onOpenExecutor,
+  onCancel,
+  onEnroute,
+  onComplaint,
+  onReviewCustomer
 }: {
   order: Order;
   role: Role;
@@ -1925,6 +2160,10 @@ function OrderDetails({
   onReview: (rating: number, text: string) => void;
   onRepeat: () => void;
   onOpenExecutor: (executorId: string) => void;
+  onCancel: (reason: string) => void;
+  onEnroute: () => void;
+  onComplaint: (type: string, text: string) => void;
+  onReviewCustomer: (rating: number, text: string) => void;
 }) {
   const service = serviceByKey(order.service);
   // По умолчанию подставляем цену заказчика — исполнитель может изменить.
@@ -1933,6 +2172,12 @@ function OrderDetails({
   const [stars, setStars] = useState(5);
   const [reviewText, setReviewText] = useState("");
   const [reach, setReach] = useState<number | null>(null);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [complaintOpen, setComplaintOpen] = useState(false);
+  const [complaintText, setComplaintText] = useState("");
+  const [custStars, setCustStars] = useState(5);
+  const [custReviewText, setCustReviewText] = useState("");
 
   // Охват: сколько исполнителей поблизости видят открытый заказ (для заказчика).
   useEffect(() => {
@@ -2001,7 +2246,14 @@ function OrderDetails({
         </Pressable>
       ) : null}
       {order.status !== "open" && role === "driver" && order.customer ? (
-        <ContactCard title="Заказчик" person={order.customer} />
+        <View>
+          <ContactCard title="Заказчик" person={order.customer} />
+          {order.customerRatingCount ? (
+            <Text style={styles.locationNote}>
+              Рейтинг заказчика: ★ {(order.customerRating ?? 0).toFixed(1)} ({order.customerRatingCount})
+            </Text>
+          ) : null}
+        </View>
       ) : null}
 
       {/* Чат доступен участникам после выбора исполнителя */}
@@ -2084,7 +2336,7 @@ function OrderDetails({
                     <MaterialCommunityIcons
                       name={bid.driverId && favorites.includes(bid.driverId) ? "heart" : "heart-outline"}
                       size={20}
-                      color={bid.driverId && favorites.includes(bid.driverId) ? "#C7503A" : colors.inkFaint}
+                      color={bid.driverId && favorites.includes(bid.driverId) ? colors.favorite : colors.inkFaint}
                     />
                   </Pressable>
                   <Pressable style={styles.flex} onPress={() => onOpenExecutor(bid.driverId ?? "")}>
@@ -2103,7 +2355,7 @@ function OrderDetails({
                     </View>
                     <View style={styles.bidStatsRow}>
                       <View style={styles.bidStat}>
-                        <MaterialCommunityIcons name="star" size={13} color="#E0A93B" />
+                        <MaterialCommunityIcons name="star" size={13} color={colors.star} />
                         <Text style={styles.bidStatText}>
                           {bid.rating ? bid.rating.toFixed(1) : "—"}
                           {bid.ratingCount ? ` (${bid.ratingCount})` : ""}
@@ -2146,6 +2398,13 @@ function OrderDetails({
       ) : null}
 
       {role === "driver" && order.status === "matched" ? (
+        <Pressable style={ui.ghostButton} onPress={onEnroute}>
+          <MaterialCommunityIcons name="car-arrow-right" size={18} color={colors.ink} />
+          <Text style={ui.ghostButtonText}>Выехал к заказчику</Text>
+        </Pressable>
+      ) : null}
+
+      {role === "driver" && (order.status === "matched" || order.status === "enroute") ? (
         <Pressable style={ui.primaryButton} onPress={onFinish}>
           <MaterialCommunityIcons name="flag-checkered" size={18} color={colors.accentText} />
           <Text style={ui.primaryButtonText}>Отметить выполненным</Text>
@@ -2162,7 +2421,19 @@ function OrderDetails({
       {role === "client" && order.status === "matched" ? (
         <View style={styles.doneBanner}>
           <MaterialCommunityIcons name="progress-clock" size={18} color={colors.inkSoft} />
-          <Text style={styles.doneText}>Исполнитель в работе. Кнопка подтверждения появится, когда он завершит.</Text>
+          <Text style={styles.doneText}>Исполнитель принял заказ. Скоро выедет к вам.</Text>
+        </View>
+      ) : null}
+
+      {role === "client" && order.status === "enroute" ? (
+        <View style={[styles.doneBanner, styles.enrouteBanner]}>
+          <MaterialCommunityIcons name="car-arrow-right" size={18} color={colors.positive} />
+          <Text style={styles.doneText}>
+            Исполнитель в пути
+            {order.execPos
+              ? ` · ≈ ${formatKm(haversineKm([order.execPos.lng, order.execPos.lat], order.coordinates))} до вас`
+              : ""}
+          </Text>
         </View>
       ) : null}
 
@@ -2218,6 +2489,113 @@ function OrderDetails({
           <Text style={styles.removeLink}>Удалить из истории</Text>
         </Pressable>
       ) : null}
+
+      {order.status === "cancelled" ? (
+        <View style={styles.doneBanner}>
+          <MaterialCommunityIcons name="close-circle-outline" size={18} color={colors.warning} />
+          <Text style={styles.doneText}>Заказ отменён{order.cancelReason ? `: ${order.cancelReason}` : ""}.</Text>
+        </View>
+      ) : null}
+
+      {role === "driver" && order.status === "done" && !order.reviewedCustomer ? (
+        <View style={styles.divBlock}>
+          <Text style={ui.label}>Оцените заказчика</Text>
+          <StarPicker value={custStars} onChange={setCustStars} />
+          <TextInput
+            value={custReviewText}
+            onChangeText={setCustReviewText}
+            placeholder="Комментарий (необязательно)"
+            placeholderTextColor={colors.inkFaint}
+            multiline
+            style={[ui.input, ui.textArea]}
+          />
+          <Pressable style={ui.primaryButton} onPress={() => onReviewCustomer(custStars, custReviewText)}>
+            <MaterialCommunityIcons name="star-outline" size={18} color={colors.accentText} />
+            <Text style={ui.primaryButtonText}>Оценить заказчика</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {role === "client" && ["open", "matched", "enroute"].includes(order.status) ? (
+        <Pressable style={ui.ghostButton} onPress={() => { setCancelReason(""); setCancelOpen(true); }}>
+          <MaterialCommunityIcons name="close-circle-outline" size={18} color={colors.warning} />
+          <Text style={[ui.ghostButtonText, { color: colors.warning }]}>Отменить заказ</Text>
+        </Pressable>
+      ) : null}
+
+      {role === "driver" && ["matched", "enroute"].includes(order.status) ? (
+        <Pressable style={ui.ghostButton} onPress={() => { setCancelReason(""); setCancelOpen(true); }}>
+          <MaterialCommunityIcons name="close-circle-outline" size={18} color={colors.warning} />
+          <Text style={[ui.ghostButtonText, { color: colors.warning }]}>Отказаться от заказа</Text>
+        </Pressable>
+      ) : null}
+
+      {["matched", "enroute", "finished", "done"].includes(order.status) ? (
+        <Pressable onPress={() => { setComplaintText(""); setComplaintOpen(true); }}>
+          <Text style={styles.removeLink}>Пожаловаться</Text>
+        </Pressable>
+      ) : null}
+
+      <Modal visible={cancelOpen} transparent animationType="fade" onRequestClose={() => setCancelOpen(false)}>
+        <View style={styles.centerModalBackdrop}>
+          <View style={styles.centerModalCard}>
+            <Text style={styles.panelTitle}>Причина отмены</Text>
+            <TextInput
+              value={cancelReason}
+              onChangeText={setCancelReason}
+              placeholder="Коротко опишите причину"
+              placeholderTextColor={colors.inkFaint}
+              multiline
+              style={[ui.input, ui.textArea]}
+            />
+            <View style={styles.rowGap}>
+              <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => setCancelOpen(false)}>
+                <Text style={ui.ghostButtonText}>Назад</Text>
+              </Pressable>
+              <Pressable
+                style={[ui.primaryButton, styles.flex]}
+                onPress={() => {
+                  onCancel(cancelReason.trim());
+                  setCancelOpen(false);
+                }}
+              >
+                <Text style={ui.primaryButtonText}>Подтвердить</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={complaintOpen} transparent animationType="fade" onRequestClose={() => setComplaintOpen(false)}>
+        <View style={styles.centerModalBackdrop}>
+          <View style={styles.centerModalCard}>
+            <Text style={styles.panelTitle}>Жалоба</Text>
+            <TextInput
+              value={complaintText}
+              onChangeText={setComplaintText}
+              placeholder="Опишите проблему — админ рассмотрит"
+              placeholderTextColor={colors.inkFaint}
+              multiline
+              style={[ui.input, ui.textArea]}
+            />
+            <View style={styles.rowGap}>
+              <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => setComplaintOpen(false)}>
+                <Text style={ui.ghostButtonText}>Назад</Text>
+              </Pressable>
+              <Pressable
+                style={[ui.primaryButton, styles.flex, !complaintText.trim() && { opacity: 0.5 }]}
+                disabled={!complaintText.trim()}
+                onPress={() => {
+                  onComplaint("other", complaintText.trim());
+                  setComplaintOpen(false);
+                }}
+              >
+                <Text style={ui.primaryButtonText}>Отправить</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2236,7 +2614,7 @@ function ContactCard({
       <View style={styles.rowCenter}>
         <Text style={styles.contactName}>{person.name}</Text>
         {person.verified ? (
-          <MaterialCommunityIcons name="check-decagram" size={16} color="#2E7D5B" />
+          <MaterialCommunityIcons name="check-decagram" size={16} color={colors.verified} />
         ) : null}
       </View>
       {person.phone ? (
@@ -2264,7 +2642,7 @@ function StarPicker({ value, onChange }: { value: number; onChange: (n: number) 
           <MaterialCommunityIcons
             name={n <= value ? "star" : "star-outline"}
             size={30}
-            color={n <= value ? "#E0A93B" : colors.inkFaint}
+            color={n <= value ? colors.star : colors.inkFaint}
           />
         </Pressable>
       ))}
@@ -2606,6 +2984,58 @@ function VerificationCard({ account, catalog }: { account: Account; catalog: Cat
   );
 }
 
+// Реферальная карточка + ссылки на юрдокументы (в профиле).
+function ProfileExtras() {
+  const [ref, setRef] = useState<{ code: string; count: number }>({ code: "", count: 0 });
+  const [legalOpen, setLegalOpen] = useState<"privacy" | "terms" | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchReferralCode()
+      .then((r) => {
+        if (!cancelled) setRef(r);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <>
+      <View style={ui.card}>
+        <Text style={styles.panelTitle}>Приглашайте друзей</Text>
+        <Text style={styles.panelSubtitle}>
+          Друг вводит ваш код при регистрации — вы получаете бонус, когда он сделает первый заказ.
+        </Text>
+        <View style={styles.referralCodeBox}>
+          <Text style={styles.referralCode}>{ref.code || "…"}</Text>
+          <Pressable
+            hitSlop={8}
+            onPress={() =>
+              ref.code &&
+              Share.share({ message: `Заказывай спецтехнику и воду в Кубере. Мой код при регистрации: ${ref.code}` })
+            }
+          >
+            <MaterialCommunityIcons name="share-variant" size={20} color={colors.ink} />
+          </Pressable>
+        </View>
+        <Text style={styles.locationNote}>Приглашено: {ref.count}</Text>
+      </View>
+
+      <View style={styles.legalLinks}>
+        <Pressable onPress={() => setLegalOpen("privacy")}>
+          <Text style={styles.legalLink}>Политика конфиденциальности</Text>
+        </Pressable>
+        <Pressable onPress={() => setLegalOpen("terms")}>
+          <Text style={styles.legalLink}>Пользовательское соглашение</Text>
+        </Pressable>
+      </View>
+      {legalOpen ? <LegalScreen type={legalOpen} onClose={() => setLegalOpen(null)} /> : null}
+    </>
+  );
+}
+
 function ProfilePanel({
   account,
   catalog,
@@ -2698,7 +3128,7 @@ function ProfilePanel({
           </View>
         </View>
         <View style={styles.ratingPill}>
-          <MaterialCommunityIcons name="star" size={16} color="#E0A93B" />
+          <MaterialCommunityIcons name="star" size={16} color={colors.star} />
           <Text style={styles.ratingText}>
             {rating > 0 ? `${rating.toFixed(1)} · ${account.ratingCount} ${plural(account.ratingCount ?? 0, "отзыв", "отзыва", "отзывов")}` : "пока нет отзывов"}
           </Text>
@@ -2958,6 +3388,8 @@ function ProfilePanel({
           </View>
         ) : null}
       </View>
+
+      <ProfileExtras />
 
       <Pressable style={ui.ghostButton} onPress={onLogout}>
         <MaterialCommunityIcons name="logout" size={18} color={colors.ink} />
@@ -3768,6 +4200,55 @@ function AdminCatalogPanel({ catalog, onChanged }: { catalog: Catalog; onChanged
   );
 }
 
+// Жалобы на модерации.
+function AdminComplaintsPanel() {
+  const [list, setList] = useState<Complaint[]>([]);
+  const load = useCallback(async () => {
+    try {
+      setList(await fetchAdminComplaints("open"));
+    } catch {
+      // тихо
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function resolve(id: string) {
+    try {
+      await decideComplaint(id, "рассмотрено");
+      void load();
+    } catch {
+      // тихо
+    }
+  }
+
+  return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Жалобы ({list.length})</Text>
+      {list.length === 0 ? (
+        <Text style={styles.panelSubtitle}>Нет открытых жалоб.</Text>
+      ) : (
+        list.map((c) => (
+          <View key={c.id} style={styles.adminUserRow}>
+            <View style={styles.flex}>
+              <Text style={styles.adminUserName} numberOfLines={2}>
+                {c.text}
+              </Text>
+              <Text style={styles.adminUserMeta}>
+                {c.fromName} → {c.toName}
+              </Text>
+            </View>
+            <Pressable style={styles.acceptButton} onPress={() => resolve(c.id)}>
+              <Text style={styles.acceptButtonText}>Закрыть</Text>
+            </Pressable>
+          </View>
+        ))
+      )}
+    </View>
+  );
+}
+
 function AdminScreen({ catalog, onCatalogChanged }: { catalog: Catalog; onCatalogChanged: () => void }) {
   const [pending, setPending] = useState<PendingVerificationRequest[]>([]);
   const [analytics, setAnalytics] = useState<DemandAnalytics | null>(null);
@@ -3980,6 +4461,8 @@ function AdminScreen({ catalog, onCatalogChanged }: { catalog: Catalog; onCatalo
         </Pressable>
       </Modal>
 
+      <AdminComplaintsPanel />
+
       <AdminOrdersFeed cities={catalog.cities} />
 
       <AdminTransactionsFeed />
@@ -4052,6 +4535,7 @@ function SchedulesCard() {
 function ChatSection({ orderId, accountId }: { orderId: string; accountId: string }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -4073,15 +4557,19 @@ function ChatSection({ orderId, accountId }: { orderId: string; accountId: strin
 
   async function send() {
     const value = text.trim();
-    if (!value) {
+    if (!value || sending) {
       return;
     }
+    setSending(true);
     setText("");
     try {
       const msg = await sendMessage(orderId, value);
       setMessages((cur) => [...cur, msg]);
     } catch {
-      // тихо
+      // не отправилось — вернём текст в поле, чтобы не потерять
+      setText(value);
+    } finally {
+      setSending(false);
     }
   }
 
@@ -4161,9 +4649,14 @@ function WalletCard({
     setBusy(true);
     try {
       const w = await topUpWallet(amount);
-      setBalance(w.balance);
-      setTransactions(w.transactions);
-      onBalanceChange(w.balance);
+      // ЮKassa: открываем оплату в браузере, баланс обновится по вебхуку.
+      if (w.confirmationUrl) {
+        await Linking.openURL(w.confirmationUrl);
+      } else if (typeof w.balance === "number") {
+        setBalance(w.balance);
+        setTransactions(w.transactions);
+        onBalanceChange(w.balance);
+      }
     } catch {
       // тихо
     } finally {
@@ -4296,8 +4789,12 @@ function statusLabel(status: Order["status"]) {
       return "открыта";
     case "matched":
       return "в работе";
+    case "enroute":
+      return "в пути";
     case "finished":
       return "ждёт подтверждения";
+    case "cancelled":
+      return "отменена";
     default:
       return "выполнена";
   }
@@ -4398,7 +4895,7 @@ const styles = StyleSheet.create({
     minWidth: 18,
     height: 18,
     borderRadius: 9,
-    backgroundColor: "#C7503A",
+    backgroundColor: colors.favorite,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 4
@@ -4560,12 +5057,12 @@ const styles = StyleSheet.create({
   },
   pricingUnit: { color: colors.inkFaint, fontSize: 12, fontWeight: "600" },
   coin: {
-    backgroundColor: "#E7B54B",
+    backgroundColor: colors.coinBg,
     borderColor: "#B4832A",
     alignItems: "center",
     justifyContent: "center"
   },
-  coinText: { color: "#5C3D0E", fontWeight: "900" },
+  coinText: { color: colors.coinText, fontWeight: "900" },
   balanceRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   bidFeeRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   repeatCard: {
@@ -4583,6 +5080,39 @@ const styles = StyleSheet.create({
   repeatKicker: { color: colors.inkFaint, fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.4 },
   repeatSubtitle: { color: colors.ink, fontSize: 14, fontWeight: "700", marginTop: 3 },
   repeatPrice: { color: colors.ink, fontSize: 15, fontWeight: "800" },
+  seasonCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius,
+    padding: 14,
+    marginBottom: 12
+  },
+  favExecChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 8
+  },
+  favCallText: { color: colors.positive, fontSize: 12, fontWeight: "800" },
+  referralCodeBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius - 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  referralCode: { color: colors.ink, fontSize: 20, fontWeight: "900", letterSpacing: 2 },
+  legalLinks: { alignItems: "center", gap: 6, paddingVertical: 4 },
+  legalLink: { color: colors.inkSoft, fontSize: 13, fontWeight: "600", textDecorationLine: "underline" },
   placeRow: { gap: 8, paddingVertical: 2, marginBottom: 8 },
   placeChip: {
     flexDirection: "row",
@@ -4799,6 +5329,7 @@ const styles = StyleSheet.create({
     padding: 12
   },
   doneText: { color: colors.positive, fontSize: 14, fontWeight: "700", flex: 1 },
+  enrouteBanner: { backgroundColor: colors.warningBg },
   profileWrap: { gap: 16 },
   avatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.ink, alignItems: "center", justifyContent: "center" },
   avatarText: { color: colors.accentText, fontSize: 20, fontWeight: "800" },

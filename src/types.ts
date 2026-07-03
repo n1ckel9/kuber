@@ -3,7 +3,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 // Ключ услуги — строка, а не фиксированный union: набор услуг приходит
 // с сервера и может расширяться без правок в приложении.
 export type ServiceKey = string;
-export type OrderStatus = "open" | "matched" | "finished" | "done";
+export type OrderStatus = "open" | "matched" | "enroute" | "finished" | "done" | "cancelled";
 export type Role = "client" | "driver";
 export type ViewMode = "orders" | "jobs" | "map" | "account" | "admin";
 
@@ -211,6 +211,7 @@ export type RegisterPayload = {
   name: string;
   role: Role;
   cityId: string;
+  referralCode?: string;
 };
 
 export type LoginPayload = {
@@ -250,4 +251,23 @@ export type Order = {
   executor?: Contact | null;
   bids: Bid[];
   reach?: number;
+  reviewedCustomer?: boolean;
+  cancelReason?: string;
+  customerRating?: number;
+  customerRatingCount?: number;
+  execPos?: { lng: number; lat: number; at: number };
+};
+
+export type Complaint = {
+  id: string;
+  orderId: string;
+  fromId: string;
+  fromName: string;
+  toId: string;
+  toName: string;
+  type: string;
+  text: string;
+  status: string;
+  resolution: string;
+  createdAt: number;
 };

@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ApiError, login, register, requestOtp, verifyOtp } from "./api";
+import { LegalScreen } from "./LegalScreen";
 import { colors, ui } from "./theme";
 import { AuthResponse, Catalog, Role } from "./types";
 
@@ -59,6 +60,10 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
   const [otpSent, setOtpSent] = useState(false);
   const [devCode, setDevCode] = useState("");
 
+  const [referralCode, setReferralCode] = useState("");
+  const [agreed, setAgreed] = useState(false);
+  const [legalOpen, setLegalOpen] = useState<"privacy" | "terms" | null>(null);
+
   const isRegister = mode === "register";
 
   async function sendOtp() {
@@ -83,7 +88,7 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
     setError("");
     setBusy(true);
     try {
-      onAuthenticated(await verifyOtp(phone, code.trim()));
+      onAuthenticated(await verifyOtp(phone, code.trim(), referralCode.trim() || undefined));
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Сервер недоступен.");
     } finally {
@@ -108,10 +113,22 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
       return;
     }
 
+    if (isRegister && !agreed) {
+      setError("Примите соглашение и политику конфиденциальности");
+      return;
+    }
+
     setBusy(true);
     try {
       const result = isRegister
-        ? await register({ name: name.trim(), email: cleanEmail, password, role, cityId })
+        ? await register({
+            name: name.trim(),
+            email: cleanEmail,
+            password,
+            role,
+            cityId,
+            referralCode: referralCode.trim() || undefined
+          })
         : await login({ email: cleanEmail, password });
       onAuthenticated(result);
     } catch (e) {
@@ -211,6 +228,17 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
                 </>
               ) : (
                 <>
+                  <View style={ui.inputGroup}>
+                    <Text style={ui.label}>Код приглашения (необязательно)</Text>
+                    <TextInput
+                      value={referralCode}
+                      onChangeText={setReferralCode}
+                      placeholder="например, K1A2B3"
+                      placeholderTextColor={colors.inkFaint}
+                      autoCapitalize="characters"
+                      style={ui.input}
+                    />
+                  </View>
                   {error ? <Text style={ui.errorText}>{error}</Text> : null}
                   <Pressable
                     style={[ui.primaryButton, busy && styles.disabled]}
@@ -219,6 +247,16 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
                   >
                     <Text style={ui.primaryButtonText}>{busy ? "Отправляем…" : "Получить код"}</Text>
                   </Pressable>
+                  <Text style={styles.consent}>
+                    Продолжая, вы принимаете{" "}
+                    <Text style={styles.link} onPress={() => setLegalOpen("terms")}>
+                      соглашение
+                    </Text>{" "}
+                    и{" "}
+                    <Text style={styles.link} onPress={() => setLegalOpen("privacy")}>
+                      политику
+                    </Text>
+                  </Text>
                 </>
               )}
             </View>
@@ -325,12 +363,45 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
               </>
             ) : null}
 
+            {isRegister ? (
+              <>
+                <View style={ui.inputGroup}>
+                  <Text style={ui.label}>Код приглашения (необязательно)</Text>
+                  <TextInput
+                    value={referralCode}
+                    onChangeText={setReferralCode}
+                    placeholder="например, K1A2B3"
+                    placeholderTextColor={colors.inkFaint}
+                    autoCapitalize="characters"
+                    style={ui.input}
+                  />
+                </View>
+                <Pressable style={styles.checkboxRow} onPress={() => setAgreed(!agreed)}>
+                  <MaterialCommunityIcons
+                    name={agreed ? "checkbox-marked" : "checkbox-blank-outline"}
+                    size={20}
+                    color={colors.ink}
+                  />
+                  <Text style={styles.checkboxText}>
+                    Принимаю{" "}
+                    <Text style={styles.link} onPress={() => setLegalOpen("terms")}>
+                      соглашение
+                    </Text>{" "}
+                    и{" "}
+                    <Text style={styles.link} onPress={() => setLegalOpen("privacy")}>
+                      политику
+                    </Text>
+                  </Text>
+                </Pressable>
+              </>
+            ) : null}
+
             {error ? <Text style={ui.errorText}>{error}</Text> : null}
 
             <Pressable
-              style={[ui.primaryButton, busy && styles.disabled]}
+              style={[ui.primaryButton, (busy || (isRegister && !agreed)) && styles.disabled]}
               onPress={submit}
-              disabled={busy}
+              disabled={busy || (isRegister && !agreed)}
             >
               <Text style={ui.primaryButtonText}>
                 {busy ? "Подождите…" : isRegister ? "Создать аккаунт" : "Войти"}
@@ -347,6 +418,7 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
           )}
         </ScrollView>
       </KeyboardAvoidingView>
+      {legalOpen ? <LegalScreen type={legalOpen} onClose={() => setLegalOpen(null)} /> : null}
     </SafeAreaView>
   );
 }
@@ -450,5 +522,9 @@ const styles = StyleSheet.create({
   },
   disabled: {
     opacity: 0.6
-  }
+  },
+  checkboxRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  checkboxText: { flex: 1, color: colors.inkSoft, fontSize: 13 },
+  consent: { color: colors.inkFaint, fontSize: 12, textAlign: "center" },
+  link: { color: colors.ink, fontWeight: "700", textDecorationLine: "underline" }
 });

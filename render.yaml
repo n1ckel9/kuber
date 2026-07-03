@@ -6,12 +6,20 @@
 services:
   - type: web
     name: kuber-api
-    runtime: node
+    # ВАЖНО: для постоянной БД (disk ниже) нужен платный инстанс — поставь "starter"
+    # (~$7/мес). На "free" диск недоступен и SQLite-база обнуляется при передеплое.
     plan: free
+    runtime: node
     rootDir: server
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
+    # Постоянный диск: база лежит на нём и переживает передеплой/перезапуск.
+    # Раскомментируй вместе с DB_FILE ниже, когда переключишь plan на starter.
+    # disk:
+    #   name: kuber-data
+    #   mountPath: /data
+    #   sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
@@ -20,3 +28,6 @@ services:
       # Напоминания заказчикам (0 — выключить):
       - key: REMINDERS_ENABLED
         value: "1"
+      # Путь к постоянной БД на диске (раскомментируй вместе с disk выше).
+      # - key: DB_FILE
+      #   value: /data/kuber.db

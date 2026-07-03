@@ -193,6 +193,33 @@ async function waitForServer() {
     check("админ: доступность услуги", (await req("POST", "/api/admin/city-services", { cityId: "testcity", serviceKey: "testsvc", enabled: true }, ta)).body?.ok === true);
     check("каталог отражает новый город", ((await req("GET", "/api/catalog")).body?.cities || []).some((c) => c.id === "testcity"));
 
+    // Отмена заказа
+    const o2 = (await req("POST", "/api/orders", { cityId: "yakutsk", service: "water", from: "Мира 5", details: "вода", price: 3000, coordinates: [129.73, 62.03] }, tc)).body.id;
+    const cancelled = await req("POST", `/api/orders/${o2}/cancel`, { reason: "передумал" }, tc);
+    check("отмена заказа → cancelled", cancelled.body?.status === "cancelled" && cancelled.body?.cancelReason === "передумал");
+
+    // Выехал + позиция + finish из enroute + взаимный отзыв + жалоба
+    const o3 = (await req("POST", "/api/orders", { cityId: "yakutsk", service: "water", from: "Лермонтова 1", details: "вода", price: 3500, coordinates: [129.74, 62.02] }, tc)).body.id;
+    await req("POST", `/api/orders/${o3}/bids`, { price: 3400, eta: "30м" }, td);
+    const bid3 = (await req("GET", "/api/orders/mine", null, tc)).body.find((o) => o.id === o3)?.bids?.[0]?.id;
+    await req("POST", `/api/orders/${o3}/accept`, { bidId: bid3 }, tc);
+    check("статус выехал (enroute)", (await req("POST", `/api/orders/${o3}/enroute`, {}, td)).body?.status === "enroute");
+    check("координаты исполнителя приняты", (await req("POST", `/api/orders/${o3}/location`, { lng: 129.73, lat: 62.03 }, td)).body?.ok === true);
+    check("заказ отдаёт execPos", ((await req("GET", "/api/orders/mine", null, tc)).body.find((o) => o.id === o3)?.execPos?.lat || 0) > 0);
+    check("finish из enroute работает", (await req("POST", `/api/orders/${o3}/finish`, {}, td)).body?.status === "finished");
+    await req("POST", `/api/orders/${o3}/confirm`, {}, tc);
+    check("исполнитель оценил заказчика", (await req("POST", `/api/orders/${o3}/review-customer`, { rating: 5, text: "ок" }, td)).body?.reviewedCustomer === true);
+    await req("POST", "/api/complaints", { orderId: o3, type: "other", text: "тест жалоба" }, td);
+    check("админ видит жалобу", ((await req("GET", "/api/admin/complaints", null, ta)).body || []).some((c) => c.orderId === o3));
+
+    // Реферальный код + быстрый вызов избранного + пополнение монет
+    check("реферальный код выдаётся", (((await req("GET", "/api/referral-code", null, tc)).body?.code) || "").length > 0);
+    await req("POST", `/api/favorites/${drvId2}`, {}, tc);
+    check("быстрый вызов избранного создал заказ", (await req("POST", `/api/favorites/${drvId2}/quick-order`, { cityId: "yakutsk", service: "water", from: "Дом 1", details: "вода", price: 3000, coordinates: [129.73, 62.03] }, tc)).status === 201);
+    const balB = (await req("GET", "/api/wallet", null, td)).body?.balance ?? 0;
+    await req("POST", "/api/wallet/topup", { amount: 30 }, td);
+    check("пополнение монет (dev, +30)", ((await req("GET", "/api/wallet", null, td)).body?.balance ?? 0) === balB + 30);
+
     // rate-limit OTP
     let last = 200;
     for (let i = 0; i < 6; i += 1) {

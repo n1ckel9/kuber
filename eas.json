@@ -5,8 +5,21 @@
   },
   "build": {
     "preview": {
+      "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "ios": {
+        "simulator": false
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://kuber-api-nod2.onrender.com"
+      }
+    },
+    "ios-simulator": {
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
       },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://kuber-api-nod2.onrender.com"

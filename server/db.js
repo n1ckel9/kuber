@@ -234,6 +234,32 @@ function migrate() {
       lat        REAL NOT NULL,
       created_at INTEGER NOT NULL
     );
+
+    -- Жалобы на заказ/пользователя (падают в админку).
+    CREATE TABLE IF NOT EXISTS complaints (
+      id          TEXT PRIMARY KEY,
+      order_id    TEXT NOT NULL,
+      from_id     TEXT NOT NULL,
+      to_id       TEXT NOT NULL,
+      type        TEXT NOT NULL,
+      text        TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'open',
+      resolution  TEXT NOT NULL DEFAULT '',
+      created_at  INTEGER NOT NULL,
+      decided_at  INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Платежи (пополнение монет через провайдера) — для идемпотентности вебхука.
+    CREATE TABLE IF NOT EXISTS payments (
+      id           TEXT PRIMARY KEY,
+      account_id   TEXT NOT NULL,
+      provider_id  TEXT NOT NULL DEFAULT '',
+      amount_rub   INTEGER NOT NULL,
+      coins        INTEGER NOT NULL,
+      status       TEXT NOT NULL DEFAULT 'pending',
+      created_at   INTEGER NOT NULL,
+      confirmed_at INTEGER NOT NULL DEFAULT 0
+    );
   `);
 }
 
@@ -257,6 +283,9 @@ function createIndexes() {
     CREATE INDEX IF NOT EXISTS idx_orders_created     ON orders(created_at);
     CREATE INDEX IF NOT EXISTS idx_accounts_created   ON accounts(created_at);
     CREATE INDEX IF NOT EXISTS idx_tx_created         ON transactions(created_at);
+    CREATE INDEX IF NOT EXISTS idx_complaints_status  ON complaints(status);
+    CREATE INDEX IF NOT EXISTS idx_payments_provider  ON payments(provider_id);
+    CREATE INDEX IF NOT EXISTS idx_accounts_refcode   ON accounts(referral_code);
   `);
 }
 
@@ -284,6 +313,15 @@ function ensureColumns() {
   add("accounts", "bio", "bio TEXT NOT NULL DEFAULT ''");
   add("accounts", "last_reminded_at", "last_reminded_at INTEGER NOT NULL DEFAULT 0");
   add("accounts", "banned", "banned INTEGER NOT NULL DEFAULT 0");
+  add("accounts", "referral_code", "referral_code TEXT NOT NULL DEFAULT ''");
+  add("accounts", "referred_by", "referred_by TEXT NOT NULL DEFAULT ''");
+  add("accounts", "referral_count", "referral_count INTEGER NOT NULL DEFAULT 0");
+  add("accounts", "referral_rewarded", "referral_rewarded INTEGER NOT NULL DEFAULT 0");
+  add("orders", "cancel_reason", "cancel_reason TEXT NOT NULL DEFAULT ''");
+  add("orders", "reviewed_customer", "reviewed_customer INTEGER NOT NULL DEFAULT 0");
+  add("orders", "exec_lng", "exec_lng REAL NOT NULL DEFAULT 0");
+  add("orders", "exec_lat", "exec_lat REAL NOT NULL DEFAULT 0");
+  add("orders", "exec_pos_at", "exec_pos_at INTEGER NOT NULL DEFAULT 0");
   add("services", "category", "category TEXT NOT NULL DEFAULT 'transport'");
   add("orders", "customer_id", "customer_id TEXT NOT NULL DEFAULT ''");
   add("orders", "executor_id", "executor_id TEXT NOT NULL DEFAULT ''");
@@ -484,16 +522,26 @@ function orderRowToOrder(row) {
     }
   }
 
-  // Контакты заказчика — исполнитель видит их после подтверждения.
+  // Контакты заказчика — исполнитель видит их после подтверждения. С рейтингом.
   let customer = null;
+  let customerRating = 0;
+  let customerRatingCount = 0;
   if (row.customer_id) {
     const cu = db
-      .prepare("SELECT id, name, phone, telegram FROM accounts WHERE id = ?")
+      .prepare("SELECT id, name, phone, telegram, rating_sum, rating_count FROM accounts WHERE id = ?")
       .get(row.customer_id);
     if (cu) {
       customer = { id: cu.id, name: cu.name, phone: cu.phone || "", telegram: cu.telegram || "" };
+      customerRatingCount = cu.rating_count || 0;
+      customerRating = cu.rating_count > 0 ? cu.rating_sum / cu.rating_count : 0;
     }
   }
+
+  // Последняя позиция исполнителя (пока заказ в пути).
+  const execPos =
+    row.status === "enroute" && row.exec_pos_at > 0
+      ? { lng: row.exec_lng, lat: row.exec_lat, at: row.exec_pos_at }
+      : undefined;
 
   return {
     id: row.id,
@@ -507,9 +555,14 @@ function orderRowToOrder(row) {
     distance: row.distance,
     status: row.status,
     reviewed: Boolean(row.reviewed),
+    reviewedCustomer: Boolean(row.reviewed_customer),
+    cancelReason: row.cancel_reason || "",
     coordinates: [row.lng, row.lat],
     customerName: row.customer_name,
     customer,
+    customerRating,
+    customerRatingCount,
+    execPos,
     executor,
     bids
   };
@@ -581,10 +634,10 @@ function listOpenOrders(cityId) {
     .map(orderRowToOrder);
 }
 
-// Заказы конкретного заказчика (все города) — лента клиента.
+// Заказы конкретного заказчика (все города) — лента клиента. Отменённые скрываем.
 function listOrdersByCustomer(customerId) {
   return db
-    .prepare("SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC")
+    .prepare("SELECT * FROM orders WHERE customer_id = ? AND status != 'cancelled' ORDER BY created_at DESC")
     .all(customerId)
     .map(orderRowToOrder);
 }
@@ -1085,10 +1138,10 @@ function listBourse(cityId, serviceKeys) {
   return rows.filter((order) => set.has(order.service));
 }
 
-// Заказы, которые исполнитель выиграл (в работе/выполненные).
+// Заказы, которые исполнитель выиграл (в работе/выполненные). Отменённые скрываем.
 function listOrdersByExecutor(executorId) {
   return db
-    .prepare("SELECT * FROM orders WHERE executor_id = ? ORDER BY created_at DESC")
+    .prepare("SELECT * FROM orders WHERE executor_id = ? AND status != 'cancelled' ORDER BY created_at DESC")
     .all(executorId)
     .map(orderRowToOrder);
 }
@@ -1662,10 +1715,213 @@ function setCityService(cityId, serviceKey, enabled) {
   }
 }
 
+// --- Рефералы ----------------------------------------------------------------
+function generateUniqueRefCode() {
+  for (let i = 0; i < 50; i += 1) {
+    const code = "K" + Math.random().toString(36).slice(2, 7).toUpperCase();
+    if (!db.prepare("SELECT 1 FROM accounts WHERE referral_code = ?").get(code)) {
+      return code;
+    }
+  }
+  return "K" + Date.now().toString(36).toUpperCase();
+}
+
+function getReferralInfo(accountId) {
+  const row = db.prepare("SELECT referral_code, referral_count FROM accounts WHERE id = ?").get(accountId);
+  if (!row) {
+    return null;
+  }
+  let code = row.referral_code;
+  if (!code) {
+    code = generateUniqueRefCode();
+    db.prepare("UPDATE accounts SET referral_code = ? WHERE id = ?").run(code, accountId);
+  }
+  return { code, count: row.referral_count || 0 };
+}
+
+function applyReferralCode(accountId, code) {
+  const referrer = db
+    .prepare("SELECT id FROM accounts WHERE referral_code = ? AND referral_code != ''")
+    .get(String(code || "").trim().toUpperCase());
+  if (!referrer) {
+    return { ok: false, error: "invalid_code" };
+  }
+  if (referrer.id === accountId) {
+    return { ok: false, error: "self" };
+  }
+  const me = db.prepare("SELECT referred_by FROM accounts WHERE id = ?").get(accountId);
+  if (me && me.referred_by) {
+    return { ok: false, error: "already" };
+  }
+  db.prepare("UPDATE accounts SET referred_by = ? WHERE id = ?").run(referrer.id, accountId);
+  return { ok: true };
+}
+
+function countDoneOrdersByCustomer(customerId) {
+  return db.prepare("SELECT COUNT(*) AS n FROM orders WHERE customer_id = ? AND status = 'done'").get(customerId).n;
+}
+
+// Начисляем пригласившему бонус, когда приглашённый выполнил ПЕРВЫЙ заказ.
+function awardReferralOnFirstDone(customerId, bonus) {
+  const acc = db.prepare("SELECT referred_by, referral_rewarded FROM accounts WHERE id = ?").get(customerId);
+  if (!acc || !acc.referred_by || acc.referral_rewarded) {
+    return null;
+  }
+  if (countDoneOrdersByCustomer(customerId) !== 1) {
+    return null;
+  }
+  const tx = db.transaction(() => {
+    if (bonus > 0) {
+      credit(acc.referred_by, {
+        id: `t_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        amount: bonus,
+        type: "bonus",
+        note: "Бонус за приглашённого",
+        createdAt: Date.now()
+      });
+    }
+    db.prepare("UPDATE accounts SET referral_count = referral_count + 1 WHERE id = ?").run(acc.referred_by);
+    db.prepare("UPDATE accounts SET referral_rewarded = 1 WHERE id = ?").run(customerId);
+  });
+  tx();
+  return { referrerId: acc.referred_by, bonus };
+}
+
+// --- Отмена заказа -----------------------------------------------------------
+function cancelOrder(orderId, reason) {
+  db.prepare("UPDATE orders SET status = 'cancelled', cancel_reason = ? WHERE id = ?").run(
+    String(reason || "").slice(0, 300),
+    orderId
+  );
+  return getOrder(orderId);
+}
+
+// --- Жалобы ------------------------------------------------------------------
+function createComplaint({ id, orderId, fromId, toId, type, text, createdAt }) {
+  db.prepare(
+    "INSERT INTO complaints (id, order_id, from_id, to_id, type, text, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?)"
+  ).run(id, orderId, fromId, toId, type, text, createdAt);
+  return { id, orderId, fromId, toId, type, text, status: "open", createdAt };
+}
+
+function listComplaintsAdmin({ status, limit, offset }) {
+  const lim = Math.max(1, Math.min(50, Math.round(limit || 20)));
+  const off = Math.max(0, Math.round(offset || 0));
+  return db
+    .prepare(
+      `SELECT c.*, af.name AS from_name, atg.name AS to_name
+         FROM complaints c
+         LEFT JOIN accounts af ON af.id = c.from_id
+         LEFT JOIN accounts atg ON atg.id = c.to_id
+        WHERE (@status IS NULL OR c.status = @status)
+        ORDER BY c.created_at DESC LIMIT @lim OFFSET @off`
+    )
+    .all({ status: status || null, lim, off })
+    .map((c) => ({
+      id: c.id,
+      orderId: c.order_id,
+      fromId: c.from_id,
+      fromName: c.from_name || "—",
+      toId: c.to_id,
+      toName: c.to_name || "—",
+      type: c.type,
+      text: c.text,
+      status: c.status,
+      resolution: c.resolution,
+      createdAt: c.created_at
+    }));
+}
+
+function decideComplaint(id, resolution) {
+  db.prepare("UPDATE complaints SET status = 'resolved', resolution = ?, decided_at = ? WHERE id = ?").run(
+    String(resolution || "").slice(0, 300),
+    Date.now(),
+    id
+  );
+  return db.prepare("SELECT from_id FROM complaints WHERE id = ?").get(id);
+}
+
+// --- Взаимный отзыв: исполнитель оценивает заказчика ------------------------
+function addCustomerReview({ id, orderId, fromId, toId, rating, text, createdAt }) {
+  const tx = db.transaction(() => {
+    db.prepare(
+      "INSERT INTO reviews (id, order_id, from_id, to_id, rating, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).run(id, orderId, fromId, toId, rating, text, createdAt);
+    db.prepare("UPDATE accounts SET rating_sum = rating_sum + ?, rating_count = rating_count + 1 WHERE id = ?").run(rating, toId);
+    db.prepare("UPDATE orders SET reviewed_customer = 1 WHERE id = ?").run(orderId);
+  });
+  tx();
+  return getOrder(orderId);
+}
+
+// --- «Выехал» + позиция исполнителя -----------------------------------------
+function setEnroute(orderId) {
+  db.prepare("UPDATE orders SET status = 'enroute' WHERE id = ?").run(orderId);
+  return getOrder(orderId);
+}
+
+function setExecPos(orderId, lng, lat) {
+  db.prepare("UPDATE orders SET exec_lng = ?, exec_lat = ?, exec_pos_at = ? WHERE id = ?").run(
+    Number(lng),
+    Number(lat),
+    Date.now(),
+    orderId
+  );
+}
+
+// --- Платежи (пополнение монет) ---------------------------------------------
+function createPayment({ id, accountId, amountRub, coins, createdAt }) {
+  db.prepare(
+    "INSERT INTO payments (id, account_id, provider_id, amount_rub, coins, status, created_at) VALUES (?, ?, '', ?, ?, 'pending', ?)"
+  ).run(id, accountId, amountRub, coins, createdAt);
+  return { id };
+}
+
+function setPaymentProvider(id, providerId) {
+  db.prepare("UPDATE payments SET provider_id = ? WHERE id = ?").run(providerId, id);
+}
+
+function getPaymentByProviderId(providerId) {
+  return db.prepare("SELECT * FROM payments WHERE provider_id = ?").get(providerId);
+}
+
+function confirmPayment(providerId) {
+  const tx = db.transaction(() => {
+    const p = db.prepare("SELECT * FROM payments WHERE provider_id = ?").get(providerId);
+    if (!p || p.status === "confirmed") {
+      return p || null;
+    }
+    credit(p.account_id, {
+      id: `t_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      amount: p.coins,
+      type: "topup",
+      note: `Пополнение на ${p.amount_rub} ₽`,
+      createdAt: Date.now()
+    });
+    db.prepare("UPDATE payments SET status = 'confirmed', confirmed_at = ? WHERE id = ?").run(Date.now(), p.id);
+    return p;
+  });
+  return tx();
+}
+
 module.exports = {
   db,
   getCatalog,
   getPriceHint,
+  getReferralInfo,
+  applyReferralCode,
+  awardReferralOnFirstDone,
+  cancelOrder,
+  createComplaint,
+  listComplaintsAdmin,
+  decideComplaint,
+  addCustomerReview,
+  setEnroute,
+  setExecPos,
+  createPayment,
+  setPaymentProvider,
+  getPaymentByProviderId,
+  confirmPayment,
   setPricingRules,
   setBanned,
   adminAdjustBalance,
