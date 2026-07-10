@@ -45,12 +45,100 @@
     ]
   },
   "tractor": {
-    "label": "Спецтехника",
+    "label": "Трактор / бульдозер",
     "unitWord": "техника",
     "fields": [
-      { "key": "kind", "label": "Тип", "type": "select", "options": ["Экскаватор", "Погрузчик", "Трактор", "Бульдозер", "Ямобур", "Автогрейдер"], "required": true },
-      { "key": "bucket", "label": "Объём ковша", "unit": "м³", "type": "number", "max": 10 },
-      { "key": "digDepth", "label": "Глубина копания", "unit": "м", "type": "number", "max": 20 }
+      { "key": "kind", "label": "Тип", "type": "select", "options": ["Трактор", "Бульдозер", "Автогрейдер", "Каток"], "required": true },
+      { "key": "power", "label": "Мощность", "unit": "л.с.", "type": "number", "max": 1000 },
+      { "key": "attachments", "label": "Навесное (отвал, щётка, ковш)", "type": "text" }
+    ]
+  },
+  "evac": {
+    "label": "Эвакуатор",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "capacity", "label": "Грузоподъёмность", "unit": "т", "type": "number", "required": true, "max": 40 },
+      { "key": "platform", "label": "Тип погрузки", "type": "select", "options": ["Сдвижная платформа", "Частичная погрузка", "Кран-эвакуатор"] },
+      { "key": "length", "label": "Длина платформы", "unit": "м", "type": "number", "max": 12 }
+    ]
+  },
+  "snow": {
+    "label": "Снегоуборка",
+    "unitWord": "техника",
+    "fields": [
+      { "key": "snowKind", "label": "Тип работ", "type": "select", "options": ["Уборка отвалом", "Погрузка и вывоз", "Роторная очистка"], "required": true },
+      { "key": "removeVolume", "label": "Объём вывоза", "unit": "м³", "type": "number", "max": 100 }
+    ]
+  },
+  "trailer": {
+    "label": "Трал / негабарит",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "capacity", "label": "Грузоподъёмность", "unit": "т", "type": "number", "required": true, "max": 120 },
+      { "key": "deckLength", "label": "Длина платформы", "unit": "м", "type": "number", "required": true, "max": 25 },
+      { "key": "kind", "label": "Тип трала", "type": "select", "options": ["Низкорамный", "Раздвижной", "Площадка"] }
+    ]
+  },
+  "autocrane": {
+    "label": "Автокран",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "liftCapacity", "label": "Грузоподъёмность", "unit": "т", "type": "number", "required": true, "max": 200 },
+      { "key": "boomLength", "label": "Длина стрелы", "unit": "м", "type": "number", "required": true, "max": 90 },
+      { "key": "reach", "label": "Макс. вылет", "unit": "м", "type": "number", "max": 90 }
+    ]
+  },
+  "autotower": {
+    "label": "Автовышка",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "height", "label": "Высота подъёма", "unit": "м", "type": "number", "required": true, "max": 60 },
+      { "key": "basketCapacity", "label": "Грузоподъёмность люльки", "unit": "кг", "type": "number", "max": 1000 },
+      { "key": "kind", "label": "Тип", "type": "select", "options": ["Телескопическая", "Коленчатая", "Ножничная"] }
+    ]
+  },
+  "excavator": {
+    "label": "Экскаватор",
+    "unitWord": "техника",
+    "fields": [
+      { "key": "bucket", "label": "Объём ковша", "unit": "м³", "type": "number", "required": true, "max": 5 },
+      { "key": "digDepth", "label": "Глубина копания", "unit": "м", "type": "number", "required": true, "max": 20 },
+      { "key": "kind", "label": "Тип", "type": "select", "options": ["Гусеничный", "Колёсный", "Мини", "Экскаватор-погрузчик"] }
+    ]
+  },
+  "loader_front": {
+    "label": "Погрузчик",
+    "unitWord": "техника",
+    "fields": [
+      { "key": "capacity", "label": "Грузоподъёмность", "unit": "т", "type": "number", "required": true, "max": 30 },
+      { "key": "kind", "label": "Тип", "type": "select", "options": ["Фронтальный", "Вилочный", "Телескопический", "Мини"], "required": true },
+      { "key": "liftHeight", "label": "Высота подъёма", "unit": "м", "type": "number", "max": 15 }
+    ]
+  },
+  "concrete": {
+    "label": "Бетон",
+    "unitWord": "техника",
+    "fields": [
+      { "key": "kind", "label": "Тип", "type": "select", "options": ["Автобетононасос", "Миксер (АБС)", "Стационарный насос"], "required": true },
+      { "key": "reach", "label": "Длина/высота подачи", "unit": "м", "type": "number", "max": 70 },
+      { "key": "volume", "label": "Объём (миксер)", "unit": "м³", "type": "number", "max": 12 }
+    ]
+  },
+  "auger": {
+    "label": "Ямобур",
+    "unitWord": "техника",
+    "fields": [
+      { "key": "diameter", "label": "Диаметр бурения", "unit": "мм", "type": "number", "required": true, "max": 1500 },
+      { "key": "depth", "label": "Глубина", "unit": "м", "type": "number", "required": true, "max": 30 }
+    ]
+  },
+  "drilling": {
+    "label": "Бурение скважин",
+    "unitWord": "установка",
+    "fields": [
+      { "key": "maxDepth", "label": "Макс. глубина", "unit": "м", "type": "number", "required": true, "max": 300 },
+      { "key": "diameter", "label": "Диаметр", "unit": "мм", "type": "number", "max": 500 },
+      { "key": "kind", "label": "Назначение", "type": "select", "options": ["На воду", "Инженерное", "Под сваи"] }
     ]
   },
   "septic": {

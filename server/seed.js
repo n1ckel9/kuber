@@ -38,28 +38,38 @@ const cities = [
 // Категории группируют услуги в интерфейсе (вкладки при выборе, разделы в профиле).
 // Ключи категорий должны совпадать с полем category у услуг ниже.
 const categories = [
-  { key: "transport", title: "Доставка и вывоз", sort: 1 },
-  { key: "equipment", title: "Спецтехника", sort: 2 },
-  { key: "utilities", title: "Сантехника и вода", sort: 3 },
-  { key: "electric", title: "Электрика и монтаж", sort: 4 }
+  { key: "equipment", title: "Спецтехника", sort: 1 },
+  { key: "transport", title: "Перевозки и вывоз", sort: 2 },
+  { key: "utilities", title: "Вода и коммунальные", sort: 3 },
+  { key: "electric", title: "Мастера", sort: 4 }
 ];
 
 const services = [
   // Доставка и вывоз
-  { key: "water", title: "Водовоз", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "transport", sort: 1 },
-  { key: "dump", title: "КамАЗ", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "transport", sort: 2 },
+  { key: "dump", title: "Самосвал", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "transport", sort: 2 },
   { key: "transport", title: "Перевозки", subtitle: "Грузовики, фургоны", icon: "truck", accent: "#556B8C", category: "transport", sort: 3 },
-  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "transport", sort: 4 },
+  { key: "evac", title: "Эвакуатор", subtitle: "Эвакуация авто", icon: "tow-truck", accent: "#B23B3B", category: "transport", sort: 5 },
+  { key: "snow", title: "Снегоуборка", subtitle: "Уборка и вывоз снега", icon: "snowflake", accent: "#3E7CB1", category: "transport", sort: 6 },
+  { key: "trailer", title: "Трал / негабарит", subtitle: "Перевозка техники", icon: "truck-trailer", accent: "#4A5D6E", category: "transport", sort: 7 },
   // Спецтехника
-  { key: "crane", title: "Манипулятор", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "equipment", sort: 5 },
-  { key: "tractor", title: "Спецтехника", subtitle: "Трактор, экскаватор", icon: "excavator", accent: "#B8942E", category: "equipment", sort: 6 },
-  // Сантехника и вода
-  { key: "septic", title: "Ассенизатор", subtitle: "Септик, выгребная яма", icon: "truck-cargo-container", accent: "#6E7C45", category: "utilities", sort: 7 },
-  { key: "plumber", title: "Сантехник", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "utilities", sort: 8 },
-  // Электрика и монтаж
-  { key: "electrician", title: "Электрик", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "electric", sort: 9 },
-  { key: "welder", title: "Сварщик", subtitle: "Металлоконструкции", icon: "fire", accent: "#C7503A", category: "electric", sort: 10 },
-  { key: "lowvoltage", title: "Слаботочник", subtitle: "Сети, видеонаблюдение", icon: "ethernet-cable", accent: "#0E8A9C", category: "electric", sort: 11 }
+  { key: "crane", title: "Манипулятор", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "equipment", sort: 10 },
+  { key: "autocrane", title: "Автокран", subtitle: "Подъём грузов", icon: "crane", accent: "#8A5CD1", category: "equipment", sort: 11 },
+  { key: "autotower", title: "Автовышка", subtitle: "Работы на высоте", icon: "ladder", accent: "#C98A2E", category: "equipment", sort: 12 },
+  { key: "excavator", title: "Экскаватор", subtitle: "Копка, траншеи", icon: "excavator", accent: "#B8942E", category: "equipment", sort: 13 },
+  { key: "loader_front", title: "Погрузчик", subtitle: "Фронтальный, вилочный", icon: "forklift", accent: "#6E7C45", category: "equipment", sort: 14 },
+  { key: "tractor", title: "Трактор / бульдозер", subtitle: "Трактор, бульдозер, грейдер", icon: "tractor", accent: "#A8862E", category: "equipment", sort: 15 },
+  { key: "concrete", title: "Бетон", subtitle: "Насос, миксер", icon: "cube-outline", accent: "#7A7A7A", category: "equipment", sort: 16 },
+  { key: "auger", title: "Ямобур", subtitle: "Столбы, сваи", icon: "screw-machine", accent: "#8C6D3A", category: "equipment", sort: 17 },
+  // Вода и коммунальные
+  { key: "water", title: "Водовоз", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "utilities", sort: 19 },
+  { key: "septic", title: "Ассенизатор", subtitle: "Септик, выгребная яма", icon: "truck-cargo-container", accent: "#6E7C45", category: "utilities", sort: 20 },
+  { key: "drilling", title: "Бурение скважин", subtitle: "Скважины на воду", icon: "water-pump", accent: "#1B6E8C", category: "utilities", sort: 22 },
+  // Мастера (работа руками)
+  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "electric", sort: 28 },
+  { key: "plumber", title: "Сантехник", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "electric", sort: 29 },
+  { key: "electrician", title: "Электрик", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "electric", sort: 30 },
+  { key: "welder", title: "Сварщик", subtitle: "Металлоконструкции", icon: "fire", accent: "#C7503A", category: "electric", sort: 31 },
+  { key: "lowvoltage", title: "Слаботочник", subtitle: "Сети, видеонаблюдение", icon: "ethernet-cable", accent: "#0E8A9C", category: "electric", sort: 32 }
 ];
 
 // Какие услуги доступны в каждом городе. Якутск — полный набор,
