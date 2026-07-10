@@ -2,7 +2,8 @@ const express = require("express");
 const repo = require("./db");
 const { hashPassword, verifyPassword, createToken } = require("./auth");
 const { geocodeAddress, suggestAddress, reverseGeocode } = require("./geocode");
-const { sendSms, smsEnabled } = require("./sms");
+const { sendCode, anyChannelEnabled } = require("./sms");
+const equipmentSpecs = require("./equipmentSpecs.json");
 
 const PORT = Number(process.env.PORT || 4000);
 // Бонус пригласившему за первый выполненный заказ приглашённого (монеты).
@@ -81,13 +82,15 @@ function makeId(prefix) {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
-// Проверка фото-строки: base64 data-URL картинки, разумного размера (до ~6 МБ base64).
+// Лимит фото ~2 МБ картинки. base64 раздувает на ~33%, поэтому по длине data-URL ~2.8 МБ.
+const MAX_PHOTO_BYTES = Math.round(2.8 * 1024 * 1024);
+// Проверка фото-строки: base64 data-URL картинки разумного размера.
 function isValidPhoto(value) {
   return (
     typeof value === "string" &&
     value.startsWith("data:image/") &&
     value.length > 100 &&
-    value.length < 6 * 1024 * 1024
+    value.length < MAX_PHOTO_BYTES
   );
 }
 
@@ -216,12 +219,10 @@ function orderRowForCost(row) {
 }
 
 // Возврат платы за отклик исполнителю (при отклонении/удалении/проигрыше).
-function refundBidFee(driverId, order, orderId) {
-  if (!driverId) {
-    return;
-  }
-  const fee = bidCost(order);
-  if (fee <= 0) {
+// fee — фактически списанная при отклике сумма (хранится на строке отклика),
+// чтобы возврат не расходился со списанием при смене нишевого тарифа.
+function refundBidFee(driverId, fee, orderId) {
+  if (!driverId || !(fee > 0)) {
     return;
   }
   repo.credit(driverId, {
@@ -366,8 +367,8 @@ app.post("/api/auth/login", rateLimit({ windowMs: 60000, max: 20 }), (req, res) 
 });
 
 // --- Вход по телефону (одноразовый код) ---
-// Если задан SMSRU_API_ID — реально шлём SMS и НЕ возвращаем код клиенту.
-// Иначе dev-режим: код в логе + devCode в ответе.
+// Код доставляется первым доступным каналом (Telegram/WhatsApp/MAX/SMS).
+// Если ни один канал не сконфигурирован — dev-режим: код в логе + devCode в ответе.
 app.post("/api/auth/request-otp", rateLimit({ windowMs: 60000, max: 5 }), async (req, res) => {
   const phone = normalizePhone(req.body?.phone);
   if (phone.length !== 11) {
@@ -375,10 +376,15 @@ app.post("/api/auth/request-otp", rateLimit({ windowMs: 60000, max: 5 }), async 
   }
   const code = String(Math.floor(1000 + Math.random() * 9000));
   repo.setOtp(phone, code, Date.now() + 5 * 60 * 1000);
-  await sendSms(phone, `Кубер: код входа ${code}`);
+  const result = await sendCode(phone, code);
   const dev = process.env.NODE_ENV !== "production";
-  // devCode отдаём только когда реальные SMS выключены.
-  res.json({ sent: true, ...(dev && !smsEnabled ? { devCode: code } : {}) });
+  // devCode отдаём только когда реальные каналы выключены; channel — куда ушёл код.
+  res.json({
+    sent: true,
+    channel: result.channel,
+    channelLabel: result.channelLabel,
+    ...(dev && !anyChannelEnabled ? { devCode: code } : {})
+  });
 });
 
 app.post("/api/auth/verify-otp", rateLimit({ windowMs: 60000, max: 15 }), (req, res) => {
@@ -454,6 +460,15 @@ app.patch("/api/account", requireAuth, (req, res) => {
     : undefined;
   const radiusKm = body.radiusKm !== undefined ? Number(body.radiusKm) : undefined;
   const available = body.available !== undefined ? Boolean(body.available) : undefined;
+  // Аватар: base64 data-URL (валидируем размер) либо пустая строка (сбросить). undefined — не менять.
+  let avatar;
+  if (body.avatar !== undefined) {
+    const raw = String(body.avatar || "").trim();
+    if (raw && !(raw.startsWith("data:") && isValidPhoto(raw))) {
+      return res.status(400).json({ error: "invalid_photo", message: "Фото профиля до 2 МБ" });
+    }
+    avatar = raw;
+  }
   res.json(
     repo.updateProfile(req.account.id, {
       name,
@@ -463,7 +478,8 @@ app.patch("/api/account", requireAuth, (req, res) => {
       telegram,
       services,
       radiusKm,
-      available
+      available,
+      avatar
     })
   );
 });
@@ -486,7 +502,7 @@ app.patch("/api/account/portfolio", requireAuth, (req, res) => {
     let photoUrl = "";
     if (rawPhoto.startsWith("data:")) {
       if (!isValidPhoto(rawPhoto)) {
-        return res.status(400).json({ error: "invalid_photo", message: "Фото слишком большое (до 6 МБ)" });
+        return res.status(400).json({ error: "invalid_photo", message: "Фото слишком большое (до 2 МБ)" });
       }
       photoUrl = rawPhoto;
     } else {
@@ -517,6 +533,258 @@ app.get("/api/executors/:id", requireAuth, (req, res) => {
     return res.status(404).json({ error: "not_found" });
   }
   res.json(profile);
+});
+
+// --- Техника исполнителя (ТТХ спецтехники по категориям) --------------------
+
+// Чистим ТТХ по схеме категории: только известные поля, приведение типов,
+// отбрасываем мусор. null — если категория не поддерживает ТТХ.
+function sanitizeSpecs(serviceKey, raw) {
+  const schema = equipmentSpecs[serviceKey];
+  if (!schema) {
+    return null;
+  }
+  const out = {};
+  const src = raw && typeof raw === "object" ? raw : {};
+  for (const field of schema.fields) {
+    const v = src[field.key];
+    if (v === undefined || v === null || v === "") {
+      continue;
+    }
+    if (field.type === "number") {
+      const n = Number(v);
+      // Отбрасываем мусор и абсурдные значения (санити-границы из схемы).
+      if (Number.isFinite(n) && n >= 0 && (field.max === undefined || n <= field.max)) {
+        out[field.key] = n;
+      }
+    } else if (field.type === "bool") {
+      out[field.key] = Boolean(v);
+    } else if (field.type === "select") {
+      if (field.options.includes(String(v))) {
+        out[field.key] = String(v);
+      }
+    } else {
+      out[field.key] = String(v).trim().slice(0, 200);
+    }
+  }
+  return out;
+}
+
+// Названия обязательных полей ТТХ, которых не хватает (для публикации в витрину).
+function missingRequiredSpecs(serviceKey, specs) {
+  const schema = equipmentSpecs[serviceKey];
+  if (!schema) {
+    return [];
+  }
+  return schema.fields
+    .filter((f) => f.required && (specs[f.key] === undefined || specs[f.key] === "" || specs[f.key] === null))
+    .map((f) => f.label);
+}
+
+app.get("/api/equipment", requireAuth, (req, res) => {
+  res.json(repo.listEquipment(req.account.id));
+});
+
+// Цена предложения: неотрицательное целое в рублях, разумный потолок.
+function sanitizePrice(v) {
+  const n = Math.floor(Number(v) || 0);
+  return n > 0 && n < 100000000 ? n : 0;
+}
+
+// Фото единицы техники: base64 data-URL (валидируем размер) либо пусто.
+function sanitizeEquipmentPhoto(raw) {
+  const v = String(raw || "").trim();
+  if (!v) {
+    return "";
+  }
+  return v.startsWith("data:") && isValidPhoto(v) ? v : "";
+}
+
+app.post("/api/equipment", requireAuth, (req, res) => {
+  const body = req.body ?? {};
+  const serviceKey = String(body.serviceKey || "");
+  const specs = sanitizeSpecs(serviceKey, body.specs);
+  if (specs === null) {
+    return res.status(400).json({ error: "invalid_service", message: "Для этой категории ТТХ не заданы" });
+  }
+  const title = String(body.title || "").trim().slice(0, 80);
+  const published = Boolean(body.published);
+  // Для публикации в витрину обязательны ключевые ТТХ (иначе объявление-«пустышка»).
+  if (published) {
+    const missing = missingRequiredSpecs(serviceKey, specs);
+    if (missing.length) {
+      return res.status(400).json({ error: "missing_specs", message: `Заполните для витрины: ${missing.join(", ")}` });
+    }
+  }
+  const result = repo.addEquipment({
+    id: makeId("eq_"),
+    accountId: req.account.id,
+    serviceKey,
+    title,
+    specs,
+    published,
+    price: sanitizePrice(body.price),
+    note: String(body.note || "").trim().slice(0, 300),
+    photo: sanitizeEquipmentPhoto(body.photo),
+    createdAt: Date.now()
+  });
+  if (!result.ok) {
+    return res.status(400).json({ error: "too_many_items", message: "Максимум 40 единиц техники" });
+  }
+  res.status(201).json(repo.listEquipment(req.account.id));
+});
+
+app.patch("/api/equipment/:id", requireAuth, (req, res) => {
+  const body = req.body ?? {};
+  const existing = repo.listEquipment(req.account.id).find((e) => e.id === req.params.id);
+  if (!existing) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  // Категорию единицы не меняем. Поля, которых нет в теле, сохраняем прежними.
+  const specs = body.specs === undefined ? existing.specs : sanitizeSpecs(existing.serviceKey, body.specs) || {};
+  const title = String(body.title ?? existing.title).trim().slice(0, 80);
+  const published = body.published === undefined ? existing.published : Boolean(body.published);
+  const price = body.price === undefined ? existing.price : sanitizePrice(body.price);
+  const note = body.note === undefined ? existing.note : String(body.note || "").trim().slice(0, 300);
+  const photo = body.photo === undefined ? existing.photo : sanitizeEquipmentPhoto(body.photo);
+  // Обязательные ТТХ при публикации.
+  if (published) {
+    const missing = missingRequiredSpecs(existing.serviceKey, specs);
+    if (missing.length) {
+      return res.status(400).json({ error: "missing_specs", message: `Заполните для витрины: ${missing.join(", ")}` });
+    }
+  }
+  repo.updateEquipment(req.account.id, req.params.id, { title, specs, published, price, note, photo });
+  // Подмена машины (фото/ТТХ/название) обнуляет СТС-подтверждение — иначе байпас доверия.
+  const identityChanged =
+    (body.title !== undefined && title !== existing.title) ||
+    (body.photo !== undefined && photo !== existing.photo) ||
+    (body.specs !== undefined && JSON.stringify(specs) !== JSON.stringify(existing.specs));
+  if (identityChanged) {
+    repo.resetEquipmentVerify(req.account.id, req.params.id);
+  }
+  res.json(repo.listEquipment(req.account.id));
+});
+
+app.delete("/api/equipment/:id", requireAuth, (req, res) => {
+  repo.deleteEquipment(req.account.id, req.params.id);
+  res.json(repo.listEquipment(req.account.id));
+});
+
+// СТС-верификация единицы: исполнитель прикладывает фото СТС → на проверку админу.
+app.post("/api/equipment/:id/verify-sts", requireAuth, (req, res) => {
+  const photo = String(req.body?.photo || "").trim();
+  if (!photo.startsWith("data:") || !isValidPhoto(photo)) {
+    return res.status(400).json({ error: "invalid_photo", message: "Приложите фото СТС (до 2 МБ)" });
+  }
+  const result = repo.setEquipmentStsPhoto(req.account.id, req.params.id, photo);
+  if (!result.ok) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  res.json(repo.listEquipment(req.account.id));
+});
+
+// Витрина «Техника в наличии»: опубликованные предложения исполнителей в городе.
+app.get("/api/offers", requireAuth, (req, res) => {
+  const cityId = String(req.query.cityId || req.account.cityId || "");
+  const service = req.query.service ? String(req.query.service) : null;
+  const verifiedOnly = req.query.verified === "1" || req.query.verified === "true";
+  if (!cityId) {
+    return res.status(400).json({ error: "no_city", message: "Не указан город" });
+  }
+  res.json(repo.listOffers({ cityId, service, verifiedOnly }));
+});
+
+// Раскрыть контакт по объявлению: логируем событие и шлём исполнителю «вами интересуются».
+app.post("/api/offers/:id/contact", requireAuth, rateLimit({ windowMs: 60000, max: 30 }), (req, res) => {
+  const offer = repo.getOfferPublic(req.params.id);
+  if (!offer || !offer.published) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  const channel = String(req.body?.channel || "").slice(0, 20);
+  // Не логируем контакт с самим собой.
+  if (offer.executorId !== req.account.id) {
+    repo.addOfferEvent({
+      id: makeId("oe_"),
+      equipmentId: offer.id,
+      fromId: req.account.id,
+      executorId: offer.executorId,
+      channel,
+      createdAt: Date.now()
+    });
+    notify(offer.executorId, "offer_interest", `${req.account.name} интересуется вашей техникой «${offer.title || "объявление"}» — свяжитесь`, "");
+  }
+  res.json({ phone: offer.phone, telegram: offer.telegram, executorName: offer.executorName });
+});
+
+// «Запросить эту технику»: создаём открытый заказ и зовём этого исполнителя (как quick-order).
+app.post("/api/offers/:id/request", requireAuth, async (req, res) => {
+  const offer = repo.getOfferPublic(req.params.id);
+  if (!offer || !offer.published) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  if (offer.executorId === req.account.id) {
+    return res.status(400).json({ error: "own_offer", message: "Нельзя заказать у самого себя" });
+  }
+  const body = req.body ?? {};
+  const city = repo.getCity(body.cityId || offer.cityId);
+  const price = Number(body.price) > 0 ? Number(body.price) : offer.price;
+  const fromText = String(body.from || "").trim().slice(0, 300);
+  const details = String(body.details || "").trim().slice(0, 2000);
+  if (!city || !fromText || !details || !(price > 0)) {
+    return res.status(400).json({ error: "invalid_order", message: "Укажите адрес, детали и цену" });
+  }
+  let coordinates = null;
+  if (Array.isArray(body.coordinates) && body.coordinates.length === 2) {
+    coordinates = [Number(body.coordinates[0]), Number(body.coordinates[1])];
+  } else {
+    const geo = await geocodeAddress(fromText, city.name);
+    if (geo) coordinates = [geo.lng, geo.lat];
+  }
+  // Геокодер мог не ответить — не блокируем запрос, ставим центр города (адрес есть текстом).
+  if (!coordinates) {
+    coordinates = [city.center_lng, city.center_lat];
+  }
+  const created = repo.insertOrder({
+    id: makeId("o_"),
+    cityId: city.id,
+    customerId: req.account.id,
+    service: offer.serviceKey,
+    from: fromText,
+    details,
+    price,
+    distance: formatDistance(haversineKm([city.center_lng, city.center_lat], coordinates)),
+    status: "open",
+    lng: coordinates[0],
+    lat: coordinates[1],
+    customerName: req.account.name,
+    createdAt: Date.now()
+  });
+  repo.addOfferEvent({ id: makeId("oe_"), equipmentId: offer.id, fromId: req.account.id, executorId: offer.executorId, channel: "request", createdAt: Date.now() });
+  notify(offer.executorId, "quick", `${req.account.name} запросил вашу технику «${offer.title || ""}» — новый заказ`, created.id);
+  res.status(201).json(created);
+});
+
+// Пожаловаться на объявление (вне заказа — контакт в витрине идёт напрямую).
+app.post("/api/offers/:id/complaint", requireAuth, (req, res) => {
+  const offer = repo.getOfferPublic(req.params.id);
+  if (!offer) {
+    return res.status(404).json({ error: "not_found" });
+  }
+  const text = String(req.body?.text || "").trim().slice(0, 1000);
+  if (!text) {
+    return res.status(400).json({ error: "empty", message: "Опишите проблему" });
+  }
+  const created = repo.createComplaint({
+    id: makeId("cmp_"),
+    orderId: "",
+    fromId: req.account.id,
+    toId: offer.executorId,
+    type: "offer",
+    text: `Объявление «${offer.title || "техника"}»: ${text}`,
+    createdAt: Date.now()
+  });
+  res.status(201).json(created);
 });
 
 // --- Заказы и ставки --------------------------------------------------------
@@ -550,7 +818,7 @@ app.get("/api/geocode/reverse", rateLimit({ windowMs: 60000, max: 60 }), require
   res.json(result);
 });
 
-app.get("/api/orders", (req, res) => {
+app.get("/api/orders", requireAuth, (req, res) => {
   const cityId = req.query.cityId || "yakutsk";
   // open=1 — только открытые (лента исполнителя).
   res.json(req.query.open === "1" ? repo.listOpenOrders(cityId) : repo.listOrders(cityId));
@@ -605,7 +873,7 @@ app.post("/api/account/verification-request", requireAuth, (req, res) => {
     return res.status(400).json({ error: "missing_fields", message: "Укажите услугу и тип документа" });
   }
   if (!isValidPhoto(photo)) {
-    return res.status(400).json({ error: "invalid_photo", message: "Приложите фото документа (до 6 МБ)" });
+    return res.status(400).json({ error: "invalid_photo", message: "Приложите фото документа (до 2 МБ)" });
   }
   if (repo.countPendingVerifications(req.account.id) >= 5) {
     return res.status(429).json({ error: "too_many_pending", message: "Слишком много заявок на проверке" });
@@ -668,6 +936,26 @@ app.post("/api/admin/verification-requests/:id", requireAuth, requireAdmin, (req
     ""
   );
   res.json(vr);
+});
+
+// СТС-верификация техники: очередь на модерацию и решение админа.
+app.get("/api/admin/equipment-verifications", requireAuth, requireAdmin, (req, res) => {
+  res.json(repo.listEquipmentVerifications());
+});
+
+app.post("/api/admin/equipment-verifications/:id", requireAuth, requireAdmin, (req, res) => {
+  const approve = Boolean(req.body?.approve);
+  const item = repo.listEquipmentVerifications().find((e) => e.id === req.params.id);
+  repo.decideEquipmentVerification(req.params.id, approve);
+  if (item) {
+    notify(
+      item.executorId,
+      "verify",
+      approve ? `Техника подтверждена по СТС: ${item.title || "единица"} ✓` : `СТС для «${item.title || "единицы"}» отклонён`,
+      ""
+    );
+  }
+  res.json(repo.listEquipmentVerifications());
 });
 
 app.get("/api/admin/users", requireAuth, requireAdmin, (req, res) => {
@@ -930,8 +1218,8 @@ app.post("/api/schedules", requireAuth, (req, res) => {
     return res.status(400).json({ error: "invalid_schedule" });
   }
   const coords =
-    Array.isArray(body.coordinates) && body.coordinates.length === 2
-      ? body.coordinates
+    Array.isArray(body.coordinates) && body.coordinates.length === 2 && Number.isFinite(Number(body.coordinates[0]))
+      ? [Number(body.coordinates[0]), Number(body.coordinates[1])]
       : [city.center_lng, city.center_lat];
   const created = repo.createSchedule({
     id: makeId("s_"),
@@ -1185,6 +1473,11 @@ app.post("/api/orders/:orderId/bids", requireAuth, (req, res) => {
     return res.status(400).json({ error: "invalid_bid" });
   }
 
+  // Откликаться можно только на открытый заказ (иначе списываем монеты впустую).
+  if (order.status !== "open") {
+    return res.status(409).json({ error: "not_open", message: "Заказ уже не открыт для откликов" });
+  }
+
   // Нельзя откликнуться дважды на один заказ.
   if (repo.hasBid(order.id, req.account.id)) {
     return res.status(409).json({ error: "already_bid", message: "Вы уже откликнулись на этот заказ" });
@@ -1215,6 +1508,7 @@ app.post("/api/orders/:orderId/bids", requireAuth, (req, res) => {
     price,
     eta: String(body.eta || "40 мин").trim(),
     rating: req.account.rating || 4.9,
+    fee, // фактически списанная плата — по ней и вернём при отмене/проигрыше
     createdAt: Date.now()
   };
 
@@ -1240,7 +1534,7 @@ app.post("/api/orders/:orderId/accept", requireAuth, (req, res) => {
   // Возврат платы тем, кого не выбрали.
   for (const bid of before?.bids ?? []) {
     if (bid.driverId && bid.driverId !== acceptedDriverId) {
-      refundBidFee(bid.driverId, orderRowForCost(order), updated.id);
+      refundBidFee(bid.driverId, bid.fee, updated.id);
     }
   }
   notify(updated.executor?.id, "accepted", "Ваш отклик принят — приступайте к заказу", updated.id);
@@ -1261,7 +1555,7 @@ app.delete("/api/orders/:orderId/bids/:bidId", requireAuth, (req, res) => {
   const updated = repo.deleteBid(req.params.orderId, req.params.bidId);
   if (rejected?.driverId) {
     notify(rejected.driverId, "rejected", "Ваш отклик отклонён заказчиком", req.params.orderId);
-    refundBidFee(rejected.driverId, orderRowForCost(order), req.params.orderId);
+    refundBidFee(rejected.driverId, rejected.fee, req.params.orderId);
   }
   res.json(updated);
 });
@@ -1319,7 +1613,7 @@ app.delete("/api/orders/:orderId", requireAuth, (req, res) => {
   // Возврат платы откликнувшимся исполнителям перед удалением.
   const full = repo.getOrder(req.params.orderId);
   for (const bid of full?.bids ?? []) {
-    refundBidFee(bid.driverId, orderRowForCost(order), req.params.orderId);
+    refundBidFee(bid.driverId, bid.fee, req.params.orderId);
   }
   repo.deleteOrder(req.params.orderId);
   res.json({ ok: true });
@@ -1449,7 +1743,7 @@ app.post("/api/orders/:orderId/cancel", requireAuth, (req, res) => {
   // Возврат платы откликнувшимся исполнителям.
   const full = repo.getOrder(req.params.orderId);
   for (const bid of full?.bids ?? []) {
-    refundBidFee(bid.driverId, orderRowForCost(order), req.params.orderId);
+    refundBidFee(bid.driverId, bid.fee, req.params.orderId);
   }
   const updated = repo.cancelOrder(req.params.orderId, reason);
   const other = isCustomer ? order.executor_id : order.customer_id;

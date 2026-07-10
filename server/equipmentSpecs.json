@@ -1,0 +1,96 @@
+{
+  "water": {
+    "label": "Водовоз",
+    "unitWord": "цистерна",
+    "fields": [
+      { "key": "volume", "label": "Объём цистерны", "unit": "м³", "type": "number", "required": true, "max": 40 },
+      { "key": "waterType", "label": "Тип воды", "type": "select", "options": ["Питьевая", "Техническая", "Любая"] },
+      { "key": "heated", "label": "Утеплённая / подогрев", "type": "bool" }
+    ]
+  },
+  "dump": {
+    "label": "КамАЗ / самосвал",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "capacity", "label": "Грузоподъёмность", "unit": "т", "type": "number", "required": true, "max": 60 },
+      { "key": "bodyVolume", "label": "Объём кузова", "unit": "м³", "type": "number", "max": 40 },
+      { "key": "unload", "label": "Разгрузка", "type": "select", "options": ["Задняя", "Боковая", "Трёхсторонняя"] }
+    ]
+  },
+  "transport": {
+    "label": "Перевозки",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "capacity", "label": "Грузоподъёмность", "unit": "т", "type": "number", "required": true, "max": 40 },
+      { "key": "bodyType", "label": "Тип кузова", "type": "select", "options": ["Тент", "Борт", "Фургон", "Рефрижератор", "Открытая платформа"] },
+      { "key": "bodyLength", "label": "Длина кузова", "unit": "м", "type": "number", "max": 20 }
+    ]
+  },
+  "loader": {
+    "label": "Грузчики",
+    "unitWord": "бригада",
+    "fields": [
+      { "key": "crew", "label": "Размер бригады", "unit": "чел", "type": "number", "required": true, "max": 50 },
+      { "key": "rigging", "label": "Свой такелаж / инструмент", "type": "bool" }
+    ]
+  },
+  "crane": {
+    "label": "Манипулятор",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "boardCapacity", "label": "Грузоподъёмность борта", "unit": "т", "type": "number", "max": 50 },
+      { "key": "craneCapacity", "label": "Грузоподъёмность стрелы", "unit": "т", "type": "number", "required": true, "max": 50 },
+      { "key": "boomLength", "label": "Длина стрелы", "unit": "м", "type": "number", "max": 60 },
+      { "key": "reach", "label": "Макс. вылет", "unit": "м", "type": "number", "max": 60 }
+    ]
+  },
+  "tractor": {
+    "label": "Спецтехника",
+    "unitWord": "техника",
+    "fields": [
+      { "key": "kind", "label": "Тип", "type": "select", "options": ["Экскаватор", "Погрузчик", "Трактор", "Бульдозер", "Ямобур", "Автогрейдер"], "required": true },
+      { "key": "bucket", "label": "Объём ковша", "unit": "м³", "type": "number", "max": 10 },
+      { "key": "digDepth", "label": "Глубина копания", "unit": "м", "type": "number", "max": 20 }
+    ]
+  },
+  "septic": {
+    "label": "Ассенизатор",
+    "unitWord": "машина",
+    "fields": [
+      { "key": "volume", "label": "Объём цистерны", "unit": "м³", "type": "number", "required": true, "max": 40 },
+      { "key": "hoseLength", "label": "Длина шланга", "unit": "м", "type": "number", "max": 60 }
+    ]
+  },
+  "plumber": {
+    "label": "Сантехник",
+    "unitWord": "специалист",
+    "fields": [
+      { "key": "experience", "label": "Опыт", "unit": "лет", "type": "number", "required": true, "max": 60 },
+      { "key": "ownTools", "label": "Свой инструмент", "type": "bool" }
+    ]
+  },
+  "electrician": {
+    "label": "Электрик",
+    "unitWord": "специалист",
+    "fields": [
+      { "key": "experience", "label": "Опыт", "unit": "лет", "type": "number", "required": true, "max": 60 },
+      { "key": "clearance", "label": "Группа допуска", "type": "select", "options": ["II", "III", "IV", "V"] }
+    ]
+  },
+  "welder": {
+    "label": "Сварщик",
+    "unitWord": "специалист",
+    "fields": [
+      { "key": "method", "label": "Вид сварки", "type": "select", "options": ["Дуговая (ММА)", "Аргон (TIG)", "Полуавтомат (MIG/MAG)", "Газовая"], "required": true },
+      { "key": "mobile", "label": "Выезд со своим аппаратом", "type": "bool" }
+    ]
+  },
+  "lowvoltage": {
+    "label": "Слаботочник",
+    "unitWord": "специалист",
+    "fields": [
+      { "key": "experience", "label": "Опыт", "unit": "лет", "type": "number", "required": true, "max": 60 },
+      { "key": "areas", "label": "Направления", "type": "text" }
+    ]
+  }
+}

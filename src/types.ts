@@ -5,7 +5,7 @@ import { MaterialCommunityIcons } from "@expo/vector-icons";
 export type ServiceKey = string;
 export type OrderStatus = "open" | "matched" | "enroute" | "finished" | "done" | "cancelled";
 export type Role = "client" | "driver";
-export type ViewMode = "orders" | "jobs" | "map" | "account" | "admin";
+export type ViewMode = "orders" | "jobs" | "map" | "account" | "admin" | "market";
 
 export type City = {
   id: string;
@@ -65,6 +65,7 @@ export type Account = {
   isAdmin?: boolean;
   services?: ServiceKey[];
   bio?: string;
+  avatar?: string;
   banned?: boolean;
   verificationBadges?: VerificationBadge[];
 };
@@ -126,10 +127,63 @@ export type ExecutorReview = {
   author: string;
 };
 
+// Единица техники исполнителя с ТТХ (значения полей по схеме категории).
+export type EquipmentVerifyStatus = "none" | "pending" | "verified" | "rejected";
+
+export type Equipment = {
+  id: string;
+  serviceKey: ServiceKey;
+  title: string;
+  specs: Record<string, string | number | boolean>;
+  published: boolean;
+  price: number;
+  note: string;
+  photo: string;
+  verifyStatus: EquipmentVerifyStatus;
+  createdAt: number;
+};
+
+// Единица техники на модерации по СТС (для админа).
+export type EquipmentVerification = {
+  id: string;
+  serviceKey: ServiceKey;
+  title: string;
+  specs: Record<string, string | number | boolean>;
+  stsPhoto: string;
+  executorName: string;
+  executorId: string;
+  createdAt: number;
+};
+
+// Предложение в витрине «Техника в наличии»: единица техники + контакты исполнителя.
+export type Offer = {
+  id: string;
+  serviceKey: ServiceKey;
+  title: string;
+  specs: Record<string, string | number | boolean>;
+  price: number;
+  note: string;
+  photo: string;
+  stsVerified: boolean;
+  createdAt: number;
+  executor: {
+    id: string;
+    name: string;
+    hasPhone: boolean;
+    hasTelegram: boolean;
+    verified: boolean;
+    available: boolean;
+    busy: boolean;
+    rating: number;
+    ratingCount: number;
+  };
+};
+
 // Публичный профиль исполнителя (для заказчика при выборе).
 export type ExecutorProfile = Account & {
   bio: string;
   portfolio: PortfolioItem[];
+  equipment: Equipment[];
   reviews: ExecutorReview[];
   jobsCompleted: number;
 };

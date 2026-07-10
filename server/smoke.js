@@ -65,6 +65,7 @@ async function waitForServer() {
     check("регистрация выдаёт токен", !!reg.body?.token);
     check("приветственный бонус 200", reg.body?.account?.balance === 200);
     const tc = reg.body.token;
+    await req("PATCH", "/api/account", { telegram: "cust_tg" }, tc);
 
     const drv = await req("POST", "/api/auth/register", { email: `d${stamp}@gmail.com`, password: "pass123", name: "Драйвер", role: "driver", cityId: "yakutsk" });
     const td = drv.body.token;
@@ -78,6 +79,10 @@ async function waitForServer() {
     check("отклик создан", bid.status === 201);
     check("плата за отклик списана (200→150)", (await req("GET", "/api/wallet", null, td)).body?.balance === 150);
     check("повторный отклик запрещён (409)", (await req("POST", `/api/orders/${oid}/bids`, { price: 3700, eta: "20м" }, td)).status === 409);
+    // S1b: контакт заказчика скрыт в открытой ленте (защита от сбора номеров)
+    const openList = (await req("GET", "/api/orders?open=1&cityId=yakutsk", null, td)).body.find((o) => o.id === oid);
+    check("контакт заказчика скрыт в открытой ленте", openList && (openList.customer?.telegram || "") === "");
+    check("аноним не читает /api/orders (401)", (await req("GET", "/api/orders?cityId=yakutsk")).status === 401);
 
     const mine = await req("GET", "/api/orders/mine", null, tc);
     const bidId = mine.body?.[0]?.bids?.[0]?.id;
@@ -88,11 +93,25 @@ async function waitForServer() {
 
     const acc = await req("POST", `/api/orders/${oid}/accept`, { bidId }, tc);
     check("принятие → matched + исполнитель", acc.body?.status === "matched" && !!acc.body?.executor);
+    // S1b: после match контакт заказчика раскрыт исполнителю
+    const jobView = (await req("GET", "/api/orders/jobs", null, td)).body.find((o) => o.id === oid);
+    check("контакт заказчика раскрыт после match", jobView && jobView.customer?.telegram === "cust_tg");
 
     check("исполнитель завершает → finished", (await req("POST", `/api/orders/${oid}/finish`, {}, td)).body?.status === "finished");
     check("заказчик не может finish (403)", (await req("POST", `/api/orders/${oid}/finish`, {}, tc)).status === 403);
     check("заказчик подтверждает → done", (await req("POST", `/api/orders/${oid}/confirm`, {}, tc)).body?.status === "done");
     check("отзыв ставится", (await req("POST", `/api/orders/${oid}/review`, { rating: 5, text: "ок" }, tc)).body?.reviewed === true);
+    // M1/M2: нельзя откликаться/принимать на закрытом (done) заказе
+    check("отклик на закрытый заказ отклонён (409)", (await req("POST", `/api/orders/${oid}/bids`, { price: 1000, eta: "x" }, td)).status === 409);
+    check("accept на закрытом заказе отклонён (404)", (await req("POST", `/api/orders/${oid}/accept`, { bidId: "nope" }, tc)).status === 404);
+    // M3: возврат платы за отклик равен фактическому списанию
+    const m3Order = await req("POST", "/api/orders", { cityId: "yakutsk", service: "water", from: "Мира 2", details: "вода", price: 3000, coordinates: [129.73, 62.03] }, tc);
+    const m3Before = (await req("GET", "/api/wallet", null, td)).body.balance;
+    await req("POST", `/api/orders/${m3Order.body.id}/bids`, { price: 2800, eta: "20м" }, td);
+    const m3AfterBid = (await req("GET", "/api/wallet", null, td)).body.balance;
+    await req("DELETE", `/api/orders/${m3Order.body.id}`, null, tc);
+    const m3AfterRefund = (await req("GET", "/api/wallet", null, td)).body.balance;
+    check("M3: возврат за отклик равен списанию", m3AfterBid === m3Before - 50 && m3AfterRefund === m3Before);
     check("рейтинг исполнителя обновился", (await req("GET", "/api/auth/me", null, td)).body?.rating === 5);
 
     check("уведомления у исполнителя есть", ((await req("GET", "/api/notifications", null, td)).body?.items?.length || 0) > 0);
@@ -108,10 +127,51 @@ async function waitForServer() {
     check("портфолио: bio сохранён", pf.body?.bio === "Опыт 10 лет");
     check("портфолио: работа добавлена", (pf.body?.portfolio?.length || 0) === 1);
 
-    // Заказчик видит публичный профиль исполнителя
+    // Техника исполнителя (ТТХ спецтехники по категории water)
+    const eqAdd = await req("POST", "/api/equipment", { serviceKey: "water", title: "ГАЗ-53", specs: { volume: "4", waterType: "Питьевая", heated: true, junk: "x" } }, td);
+    check("техника: добавлена", eqAdd.status === 201 && (eqAdd.body?.length || 0) === 1);
+    check("техника: ТТХ очищены по схеме (число + мусор убран)", eqAdd.body?.[0]?.specs?.volume === 4 && eqAdd.body?.[0]?.specs?.junk === undefined && eqAdd.body?.[0]?.specs?.waterType === "Питьевая");
+    const eqId = eqAdd.body[0].id;
+    const eqBad = await req("POST", "/api/equipment", { serviceKey: "plumber_unknown", title: "x", specs: {} }, td);
+    check("техника: неизвестная категория отклонена (400)", eqBad.status === 400);
+    const eqUpd = await req("PATCH", `/api/equipment/${eqId}`, { title: "ГАЗ-53 (обновл.)", specs: { volume: 5, waterType: "Техническая", heated: false } }, td);
+    check("техника: обновлена", eqUpd.body?.[0]?.title === "ГАЗ-53 (обновл.)" && eqUpd.body?.[0]?.specs?.volume === 5);
+    const eqSelectBad = await req("POST", "/api/equipment", { serviceKey: "water", title: "y", specs: { waterType: "Газировка" } }, td);
+    check("техника: недопустимое значение select отброшено", eqSelectBad.body?.[eqSelectBad.body.length - 1]?.specs?.waterType === undefined);
+
+    // Витрина «Техника в наличии»: публикация → предложение видно заказчику
+    check("витрина: до публикации пусто", ((await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body?.length || 0) === 0);
+    await req("PATCH", `/api/equipment/${eqId}`, { published: true, price: 3500, note: "по городу" }, td);
+    const offers = await req("GET", "/api/offers?cityId=yakutsk", null, tc);
+    check("витрина: предложение опубликовано", (offers.body?.length || 0) === 1 && offers.body[0].price === 3500 && offers.body[0].executor?.name === "Драйвер");
+    check("витрина: ТТХ и категория в предложении", offers.body[0].serviceKey === "water" && offers.body[0].specs?.volume === 5);
+    check("витрина: фильтр по услуге", ((await req("GET", "/api/offers?cityId=yakutsk&service=water", null, tc)).body?.length || 0) === 1);
+    check("витрина: другой город не показывает", ((await req("GET", "/api/offers?cityId=ekaterinburg", null, tc)).body?.length || 0) === 0);
+    await req("PATCH", `/api/equipment/${eqId}`, { published: false }, td);
+    check("витрина: снятие с публикации", ((await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body?.length || 0) === 0);
+
+    // Заказчик видит публичный профиль исполнителя (портфолио + техника)
     const drvId = drv.body.account.id;
     const prof = await req("GET", `/api/executors/${drvId}`, null, tc);
     check("публичный профиль исполнителя", prof.body?.portfolio?.length === 1 && prof.body?.reviews?.length === 1);
+    check("публичный профиль: без утечки контактов/баланса", prof.body?.email === undefined && prof.body?.phone === undefined && prof.body?.balance === undefined);
+    check("публичный профиль: черновик (не опубликован) скрыт", (prof.body?.equipment?.length || 0) === 0);
+    await req("PATCH", `/api/equipment/${eqId}`, { published: true }, td);
+    const prof2 = await req("GET", `/api/executors/${drvId}`, null, tc);
+    check("публичный профиль: опубликованная техника видна", (prof2.body?.equipment?.length || 0) >= 1 && prof2.body.equipment[0].specs.volume === 5);
+    await req("PATCH", `/api/equipment/${eqId}`, { published: false }, td);
+
+    // Аватар профиля + лимит фото ~2 МБ
+    const smallPhoto = "data:image/png;base64," + "A".repeat(300);
+    await req("PATCH", "/api/account", { avatar: smallPhoto }, td);
+    check("аватар: сохранён и виден в профиле", ((await req("GET", `/api/executors/${drvId}`, null, tc)).body?.avatar || "").startsWith("data:"));
+    check("аватар: имя не затёрлось при avatar-only save", (await req("GET", `/api/executors/${drvId}`, null, tc)).body?.name === "Драйвер");
+    check("фото > 2 МБ отклонено (400)", (await req("PATCH", "/api/account", { avatar: "data:image/png;base64," + "A".repeat(3000000) }, td)).status === 400);
+    await req("PATCH", "/api/account", { avatar: "" }, td);
+    check("аватар: сброс пустой строкой", ((await req("GET", `/api/executors/${drvId}`, null, tc)).body?.avatar || "") === "");
+
+    const eqDel = await req("DELETE", `/api/equipment/${eqId}`, null, td);
+    check("техника: удалена", Array.isArray(eqDel.body) && !eqDel.body.some((e) => e.id === eqId));
 
     // Верификация по документу
     const photo = "data:image/png;base64," + "A".repeat(200);
@@ -124,7 +184,7 @@ async function waitForServer() {
     check("config: pricingRules присутствует", Array.isArray((await req("GET", "/api/config")).body?.pricingRules));
 
     // Монеты по нише (нужен админ)
-    const adminReg = await req("POST", "/api/auth/register", { email: "admin_smoke@gmail.com", password: "pass123", name: "Админ", role: "client", cityId: "kazan" });
+    const adminReg = await req("POST", "/api/auth/register", { email: "admin_smoke@gmail.com", password: "pass123", name: "Админ", role: "client", cityId: "ekaterinburg" });
     const ta = adminReg.body.token;
     check("админ определён по ADMIN_EMAILS", adminReg.body?.account?.isAdmin === true);
     check("админ: грид цен непустой", ((await req("GET", "/api/admin/pricing", null, ta)).body?.grid?.length || 0) > 0);
@@ -134,12 +194,51 @@ async function waitForServer() {
     check("аналитика: категории и матрица", Array.isArray(an.body?.byCategory) && Array.isArray(an.body?.matrix));
     check("аналитика с фильтром города", (await req("GET", "/api/admin/analytics?days=90&cityId=yakutsk", null, ta)).body?.cityId === "yakutsk");
     check("админ: заявка на верификацию видна с фото", ((await req("GET", "/api/admin/verification-requests", null, ta)).body?.[0]?.photo || "").startsWith("data:"));
-    await req("POST", "/api/admin/pricing", { cityId: "kazan", serviceKey: "water", coinCost: 25, enabled: true }, ta);
+    await req("POST", "/api/admin/pricing", { cityId: "ekaterinburg", serviceKey: "water", coinCost: 25, enabled: true }, ta);
 
-    const drv2 = await req("POST", "/api/auth/register", { email: `e${stamp}@gmail.com`, password: "pass123", name: "Драйвер2", role: "driver", cityId: "kazan" }, null);
+    // Фото техники + СТС-верификация (на свежей единице — прежнюю удалили выше)
+    const eqAdd2 = await req("POST", "/api/equipment", { serviceKey: "crane", title: "Isuzu", specs: { boardCapacity: 5, craneCapacity: 3, boomLength: 12 }, photo }, td);
+    const eq2 = eqAdd2.body.find((e) => e.title === "Isuzu").id;
+    check("техника: фото сохранено при создании", ((await req("GET", "/api/equipment", null, td)).body.find((e) => e.id === eq2)?.photo || "").startsWith("data:"));
+    const stsReq = await req("POST", `/api/equipment/${eq2}/verify-sts`, { photo }, td);
+    check("СТС: заявка на проверку (pending)", stsReq.body.find((e) => e.id === eq2)?.verifyStatus === "pending");
+    const eqQueue = await req("GET", "/api/admin/equipment-verifications", null, ta);
+    check("СТС: админ видит технику в очереди с фото СТС", eqQueue.body.some((e) => e.id === eq2 && (e.stsPhoto || "").startsWith("data:")));
+    check("СТС: не-админ в очередь не может (403)", (await req("GET", "/api/admin/equipment-verifications", null, td)).status === 403);
+    await req("POST", `/api/admin/equipment-verifications/${eq2}`, { approve: true }, ta);
+    check("СТС: после подтверждения verified", (await req("GET", "/api/equipment", null, td)).body.find((e) => e.id === eq2)?.verifyStatus === "verified");
+    await req("PATCH", `/api/equipment/${eq2}`, { published: true }, td);
+    const vOffers = (await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body.find((o) => o.id === eq2);
+    check("витрина: бейдж stsVerified + фото в offer", vOffers?.stsVerified === true && (vOffers?.photo || "").startsWith("data:"));
+    check("витрина: фильтр verified=1 показывает", ((await req("GET", "/api/offers?cityId=yakutsk&verified=1", null, tc)).body || []).some((o) => o.id === eq2));
+
+    // Витрина 2.0: обяз. ТТХ, скрытые контакты, контакт-по-тапу, запрос, жалоба, сброс СТС
+    check("витрина: публикация без обяз. ТТХ отклонена (400)", (await req("POST", "/api/equipment", { serviceKey: "crane", title: "Пустой", specs: {}, published: true }, td)).status === 400);
+    await req("PATCH", "/api/account", { telegram: "drv_tg" }, td);
+    const off2 = (await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body.find((o) => o.id === eq2);
+    check("витрина: контакты скрыты, только флаги", off2 && off2.executor.phone === undefined && off2.executor.hasTelegram === true);
+    check("витрина: занятость — свободен (available, не занят)", off2.executor.available === true && off2.executor.busy === false);
+    await req("PATCH", "/api/account", { available: false }, td);
+    check("витрина: занятость отражает «не на линии»", (await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body.find((o) => o.id === eq2)?.executor.available === false);
+    await req("PATCH", "/api/account", { available: true }, td);
+    const contactRes = await req("POST", `/api/offers/${eq2}/contact`, { channel: "telegram" }, tc);
+    check("витрина: контакт раскрыт по тапу", contactRes.body?.telegram === "drv_tg");
+    const reqRes = await req("POST", `/api/offers/${eq2}/request`, { cityId: "yakutsk", from: "Ленина 1", details: "нужен манипулятор", price: 5000 }, tc);
+    check("витрина: запрос техники → заказ этому исполнителю (201)", reqRes.status === 201 && reqRes.body?.service === "crane");
+    const cmp = await req("POST", `/api/offers/${eq2}/complaint`, { text: "фейк объявление" }, tc);
+    check("витрина: жалоба на объявление (201, type=offer)", cmp.status === 201 && cmp.body?.type === "offer");
+    check("админ: видит жалобу на объявление", (await req("GET", "/api/admin/complaints", null, ta)).body.some((c) => c.type === "offer"));
+    // Подмена машины (правка ТТХ) сбрасывает СТС
+    check("СТС: до правки verified", (await req("GET", "/api/equipment", null, td)).body.find((e) => e.id === eq2)?.verifyStatus === "verified");
+    await req("PATCH", `/api/equipment/${eq2}`, { specs: { boardCapacity: 7, craneCapacity: 4, boomLength: 14 } }, td);
+    check("СТС: сброшен после правки ТТХ", (await req("GET", "/api/equipment", null, td)).body.find((e) => e.id === eq2)?.verifyStatus === "none");
+
+    await req("PATCH", `/api/equipment/${eq2}`, { published: false }, td);
+
+    const drv2 = await req("POST", "/api/auth/register", { email: `e${stamp}@gmail.com`, password: "pass123", name: "Драйвер2", role: "driver", cityId: "ekaterinburg" }, null);
     const td2 = drv2.body.token;
-    await req("PATCH", "/api/account", { services: ["water"], role: "driver", cityId: "kazan" }, td2);
-    const korder = await req("POST", "/api/orders", { cityId: "kazan", service: "water", from: "Баумана 1", details: "вода", price: 3000, coordinates: [49.1, 55.8] }, ta);
+    await req("PATCH", "/api/account", { services: ["water"], role: "driver", cityId: "ekaterinburg" }, td2);
+    const korder = await req("POST", "/api/orders", { cityId: "ekaterinburg", service: "water", from: "Баумана 1", details: "вода", price: 3000, coordinates: [49.1, 55.8] }, ta);
     const kbid = await req("POST", `/api/orders/${korder.body.id}/bids`, { price: 2900, eta: "30м" }, td2);
     check("отклик по платной нише прошёл (201)", kbid.status === 201);
     check("списано по нишевой цене 25 (200→175)", (await req("GET", "/api/wallet", null, td2)).body?.balance === 175);
@@ -162,7 +261,7 @@ async function waitForServer() {
     // Массовые цены
     const bulk = await req("POST", "/api/admin/pricing/bulk", { rules: [
       { cityId: "yakutsk", serviceKey: "dump", coinCost: 15, enabled: true },
-      { cityId: "kazan", serviceKey: "dump", coinCost: 15, enabled: true }
+      { cityId: "ekaterinburg", serviceKey: "dump", coinCost: 15, enabled: true }
     ] }, ta);
     check("массовые цены применены (2)", bulk.body?.ok === true && bulk.body?.count === 2);
 
@@ -219,6 +318,10 @@ async function waitForServer() {
     const balB = (await req("GET", "/api/wallet", null, td)).body?.balance ?? 0;
     await req("POST", "/api/wallet/topup", { amount: 30 }, td);
     check("пополнение монет (dev, +30)", ((await req("GET", "/api/wallet", null, td)).body?.balance ?? 0) === balB + 30);
+
+    // OTP: без сконфигурированных каналов — dev-режим (channel="dev" + devCode)
+    const otp = await req("POST", "/api/auth/request-otp", { phone: "89007778899" });
+    check("OTP: dev-канал + devCode", otp.body?.channel === "dev" && typeof otp.body?.devCode === "string");
 
     // rate-limit OTP
     let last = 200;

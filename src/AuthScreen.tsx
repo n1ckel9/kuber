@@ -59,6 +59,7 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
   const [code, setCode] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [devCode, setDevCode] = useState("");
+  const [channelLabel, setChannelLabel] = useState("");
 
   const [referralCode, setReferralCode] = useState("");
   const [agreed, setAgreed] = useState(false);
@@ -77,6 +78,7 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
       const res = await requestOtp(phone);
       setOtpSent(true);
       setDevCode(res.devCode ?? "");
+      setChannelLabel(res.channelLabel && res.channel !== "dev" ? res.channelLabel : "");
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Сервер недоступен.");
     } finally {
@@ -195,7 +197,7 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
               {otpSent ? (
                 <>
                   <View style={ui.inputGroup}>
-                    <Text style={ui.label}>Код из SMS</Text>
+                    <Text style={ui.label}>{channelLabel ? `Код из ${channelLabel}` : "Код из сообщения"}</Text>
                     <TextInput
                       value={code}
                       onChangeText={setCode}
@@ -206,7 +208,7 @@ export function AuthScreen({ catalog, onAuthenticated }: AuthScreenProps) {
                     />
                   </View>
                   {devCode ? (
-                    <Text style={styles.devHint}>Демо-режим: код {devCode} (в проде придёт по SMS)</Text>
+                    <Text style={styles.devHint}>Демо-режим: код {devCode} (в проде придёт в сообщении)</Text>
                   ) : null}
                   {error ? <Text style={ui.errorText}>{error}</Text> : null}
                   <Pressable

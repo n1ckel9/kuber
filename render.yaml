@@ -31,3 +31,24 @@ services:
       # Путь к постоянной БД на диске (раскомментируй вместе с disk выше).
       # - key: DB_FILE
       #   value: /data/kuber.db
+      #
+      # --- Доставка кода подтверждения (задай в дашборде Render как Secret) ---
+      # Каналы пробуются по приоритету, берётся первый успешный. Если ничего не
+      # задано — dev-режим (код виден в приложении). Достаточно одного канала.
+      #
+      # Telegram Gateway (gatewayapi.telegram.org) — рекомендуется, дешевле SMS:
+      # - key: TELEGRAM_GATEWAY_TOKEN
+      #   sync: false
+      # WhatsApp Cloud API (Meta) — нужен одобренный шаблон аутентификации:
+      # - key: WHATSAPP_TOKEN
+      #   sync: false
+      # - key: WHATSAPP_PHONE_ID
+      #   sync: false
+      # - key: WHATSAPP_TEMPLATE   # имя шаблона, по умолч. verification_code
+      #   value: "verification_code"
+      # MAX (botapi.max.ru) — только со сценарием бота (см. server/sms.js):
+      # - key: MAX_BOT_TOKEN
+      #   sync: false
+      # SMS.ru — запасной канал:
+      # - key: SMSRU_API_ID
+      #   sync: false

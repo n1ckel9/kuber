@@ -1,7 +1,7 @@
 import * as ImagePicker from "expo-image-picker";
 
-// Максимальный размер итоговой data-URL строки (сервер принимает до ~6 МБ).
-const MAX_DATA_URL = 5 * 1024 * 1024;
+// Лимит ~2 МБ картинки (base64 раздувает на ~33% → ~2.8 МБ строки). Синхронно с сервером.
+const MAX_DATA_URL = Math.round(2.8 * 1024 * 1024);
 
 export type PickImageResult = { ok: true; dataUrl: string } | { ok: false; error: string };
 
@@ -42,7 +42,7 @@ export async function pickImageAsBase64(): Promise<PickImageResult> {
     }
 
     if (dataUrl.length > MAX_DATA_URL) {
-      return { ok: false, error: "Фото слишком большое. Выберите снимок поменьше." };
+      return { ok: false, error: "Фото больше 2 МБ. Выберите снимок поменьше или обрежьте." };
     }
 
     return { ok: true, dataUrl };

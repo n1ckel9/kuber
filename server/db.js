@@ -57,6 +57,7 @@ function migrate() {
       available     INTEGER NOT NULL DEFAULT 1,
       verified      INTEGER NOT NULL DEFAULT 0,
       verify_status TEXT NOT NULL DEFAULT 'none',
+      avatar        TEXT NOT NULL DEFAULT '',
       password_hash TEXT NOT NULL DEFAULT '',
       created_at    INTEGER NOT NULL DEFAULT 0
     );
@@ -135,6 +136,7 @@ function migrate() {
       price      INTEGER NOT NULL,
       eta        TEXT NOT NULL,
       rating     REAL NOT NULL DEFAULT 4.9,
+      fee        INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL
     );
 
@@ -201,6 +203,23 @@ function migrate() {
       created_at  INTEGER NOT NULL
     );
 
+    -- Техника исполнителя: единицы спецтехники с ТТХ по каждой его категории.
+    -- specs — JSON {ключ_поля: значение} по схеме equipmentSpecs.json.
+    CREATE TABLE IF NOT EXISTS executor_equipment (
+      id          TEXT PRIMARY KEY,
+      account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      service_key TEXT NOT NULL,
+      title       TEXT NOT NULL DEFAULT '',
+      specs       TEXT NOT NULL DEFAULT '{}',
+      published   INTEGER NOT NULL DEFAULT 0,
+      price       INTEGER NOT NULL DEFAULT 0,
+      note        TEXT NOT NULL DEFAULT '',
+      photo       TEXT NOT NULL DEFAULT '',
+      sts_photo   TEXT NOT NULL DEFAULT '',
+      verify_status TEXT NOT NULL DEFAULT 'none',
+      created_at  INTEGER NOT NULL
+    );
+
     -- Заявки на верификацию по услуге и типу документа (с фото документа).
     CREATE TABLE IF NOT EXISTS verification_requests (
       id          TEXT PRIMARY KEY,
@@ -249,6 +268,16 @@ function migrate() {
       decided_at  INTEGER NOT NULL DEFAULT 0
     );
 
+    -- События витрины: кто раскрыл контакт по объявлению (тёплый лид + след для споров).
+    CREATE TABLE IF NOT EXISTS offer_events (
+      id           TEXT PRIMARY KEY,
+      equipment_id TEXT NOT NULL,
+      from_id      TEXT NOT NULL,
+      executor_id  TEXT NOT NULL,
+      channel      TEXT NOT NULL DEFAULT '',
+      created_at   INTEGER NOT NULL
+    );
+
     -- Платежи (пополнение монет через провайдера) — для идемпотентности вебхука.
     CREATE TABLE IF NOT EXISTS payments (
       id           TEXT PRIMARY KEY,
@@ -276,6 +305,7 @@ function createIndexes() {
     CREATE INDEX IF NOT EXISTS idx_messages_order     ON messages(order_id);
     CREATE INDEX IF NOT EXISTS idx_notif_account      ON notifications(account_id);
     CREATE INDEX IF NOT EXISTS idx_portfolio_account  ON portfolio_items(account_id);
+    CREATE INDEX IF NOT EXISTS idx_equipment_account  ON executor_equipment(account_id);
     CREATE INDEX IF NOT EXISTS idx_orders_service     ON orders(service);
     CREATE INDEX IF NOT EXISTS idx_verif_account      ON verification_requests(account_id);
     CREATE INDEX IF NOT EXISTS idx_verif_status       ON verification_requests(status);
@@ -311,6 +341,7 @@ function ensureColumns() {
   add("accounts", "verified", "verified INTEGER NOT NULL DEFAULT 0");
   add("accounts", "verify_status", "verify_status TEXT NOT NULL DEFAULT 'none'");
   add("accounts", "bio", "bio TEXT NOT NULL DEFAULT ''");
+  add("accounts", "avatar", "avatar TEXT NOT NULL DEFAULT ''");
   add("accounts", "last_reminded_at", "last_reminded_at INTEGER NOT NULL DEFAULT 0");
   add("accounts", "banned", "banned INTEGER NOT NULL DEFAULT 0");
   add("accounts", "referral_code", "referral_code TEXT NOT NULL DEFAULT ''");
@@ -327,6 +358,13 @@ function ensureColumns() {
   add("orders", "executor_id", "executor_id TEXT NOT NULL DEFAULT ''");
   add("orders", "reviewed", "reviewed INTEGER NOT NULL DEFAULT 0");
   add("bids", "driver_id", "driver_id TEXT NOT NULL DEFAULT ''");
+  add("bids", "fee", "fee INTEGER NOT NULL DEFAULT 0");
+  add("executor_equipment", "published", "published INTEGER NOT NULL DEFAULT 0");
+  add("executor_equipment", "price", "price INTEGER NOT NULL DEFAULT 0");
+  add("executor_equipment", "note", "note TEXT NOT NULL DEFAULT ''");
+  add("executor_equipment", "photo", "photo TEXT NOT NULL DEFAULT ''");
+  add("executor_equipment", "sts_photo", "sts_photo TEXT NOT NULL DEFAULT ''");
+  add("executor_equipment", "verify_status", "verify_status TEXT NOT NULL DEFAULT 'none'");
 }
 
 function seedIfEmpty() {
@@ -496,6 +534,7 @@ function orderRowToOrder(row) {
       driver: bid.driver,
       price: bid.price,
       eta: bid.eta,
+      fee: bid.fee || 0,
       // рейтинг исполнителя: живой из аккаунта, иначе значение из ставки
       rating: bid.a_count > 0 ? bid.a_sum / bid.a_count : bid.rating,
       ratingCount: bid.a_count || 0,
@@ -504,6 +543,10 @@ function orderRowToOrder(row) {
       // профессия подтверждена документом именно для услуги этого заказа
       verifiedService: (bid.a_verif_service || 0) > 0
     }));
+
+  // Контакты раскрываем только после подтверждения (matched+), не в открытой ленте —
+  // иначе исполнители собирают телефоны заказчиков прямо с биржи.
+  const contactsVisible = row.status !== "open";
 
   // Контакты выбранного исполнителя — для обмена после подтверждения.
   let executor = null;
@@ -515,8 +558,8 @@ function orderRowToOrder(row) {
       executor = {
         id: ex.id,
         name: ex.name,
-        phone: ex.phone || "",
-        telegram: ex.telegram || "",
+        phone: contactsVisible ? ex.phone || "" : "",
+        telegram: contactsVisible ? ex.telegram || "" : "",
         verified: ex.verified === 1
       };
     }
@@ -531,7 +574,12 @@ function orderRowToOrder(row) {
       .prepare("SELECT id, name, phone, telegram, rating_sum, rating_count FROM accounts WHERE id = ?")
       .get(row.customer_id);
     if (cu) {
-      customer = { id: cu.id, name: cu.name, phone: cu.phone || "", telegram: cu.telegram || "" };
+      customer = {
+        id: cu.id,
+        name: cu.name,
+        phone: contactsVisible ? cu.phone || "" : "",
+        telegram: contactsVisible ? cu.telegram || "" : ""
+      };
       customerRatingCount = cu.rating_count || 0;
       customerRating = cu.rating_count > 0 ? cu.rating_sum / cu.rating_count : 0;
     }
@@ -689,6 +737,7 @@ function toPublicAccount(row) {
     verified: row.verified === 1,
     verifyStatus: row.verify_status || "none",
     bio: row.bio || "",
+    avatar: row.avatar || "",
     banned: row.banned === 1,
     services: getAccountServices(row.id),
     verificationBadges: getExecutorBadges(row.id)
@@ -754,7 +803,7 @@ function createAccount(account) {
 function updateProfile(accountId, fields) {
   const current = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
   db.prepare(
-    "UPDATE accounts SET name = ?, role = ?, city_id = ?, phone = ?, telegram = ?, radius_km = ?, available = ? WHERE id = ?"
+    "UPDATE accounts SET name = ?, role = ?, city_id = ?, phone = ?, telegram = ?, radius_km = ?, available = ?, avatar = ? WHERE id = ?"
   ).run(
     fields.name,
     fields.role,
@@ -763,6 +812,7 @@ function updateProfile(accountId, fields) {
     fields.telegram !== undefined ? fields.telegram : current.telegram,
     fields.radiusKm !== undefined ? Math.max(0, Math.round(fields.radiusKm)) : current.radius_km,
     fields.available !== undefined ? (fields.available ? 1 : 0) : current.available,
+    fields.avatar !== undefined ? fields.avatar : current.avatar,
     accountId
   );
   if (Array.isArray(fields.services)) {
@@ -1097,15 +1147,17 @@ function withdraw(accountId, { id, amount, note, createdAt }) {
 
 function insertBid(bid) {
   db.prepare(
-    `INSERT INTO bids (id, order_id, driver_id, driver, price, eta, rating, created_at)
-     VALUES (@id, @orderId, @driverId, @driver, @price, @eta, @rating, @createdAt)`
-  ).run(bid);
+    `INSERT INTO bids (id, order_id, driver_id, driver, price, eta, rating, fee, created_at)
+     VALUES (@id, @orderId, @driverId, @driver, @price, @eta, @rating, @fee, @createdAt)`
+  ).run({ ...bid, fee: bid.fee || 0 });
   return getOrder(bid.orderId)?.bids.find((b) => b.id === bid.id) ?? null;
 }
 
 function acceptBid(orderId, bidId) {
-  const order = db.prepare("SELECT id FROM orders WHERE id = ?").get(orderId);
-  if (!order) {
+  // Принять отклик можно только на открытом заказе — иначе можно «воскресить»
+  // отменённый/завершённый заказ и перезаписать исполнителя.
+  const order = db.prepare("SELECT id, status FROM orders WHERE id = ?").get(orderId);
+  if (!order || order.status !== "open") {
     return null;
   }
   const bid = db.prepare("SELECT driver_id FROM bids WHERE id = ? AND order_id = ?").get(bidId, orderId);
@@ -1221,6 +1273,220 @@ function deletePortfolioItem(accountId, itemId) {
   db.prepare("DELETE FROM portfolio_items WHERE id = ? AND account_id = ?").run(itemId, accountId);
 }
 
+// --- Техника исполнителя (ТТХ спецтехники по категориям) ---------------------
+
+function equipmentRow(row) {
+  let specs = {};
+  try {
+    specs = JSON.parse(row.specs || "{}");
+  } catch {
+    specs = {};
+  }
+  return {
+    id: row.id,
+    serviceKey: row.service_key,
+    title: row.title,
+    specs,
+    published: Boolean(row.published),
+    price: row.price || 0,
+    note: row.note || "",
+    photo: row.photo || "",
+    verifyStatus: row.verify_status || "none",
+    createdAt: row.created_at
+  };
+}
+
+function listEquipment(accountId) {
+  return db
+    .prepare(
+      "SELECT id, service_key, title, specs, published, price, note, photo, verify_status, created_at FROM executor_equipment WHERE account_id = ? ORDER BY service_key, created_at"
+    )
+    .all(accountId)
+    .map(equipmentRow);
+}
+
+function addEquipment({ id, accountId, serviceKey, title, specs, published, price, note, photo, createdAt }) {
+  const count = db
+    .prepare("SELECT COUNT(*) AS n FROM executor_equipment WHERE account_id = ?")
+    .get(accountId).n;
+  if (count >= 40) {
+    return { ok: false, error: "limit" };
+  }
+  db.prepare(
+    `INSERT INTO executor_equipment (id, account_id, service_key, title, specs, published, price, note, photo, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, accountId, serviceKey, title, JSON.stringify(specs || {}), published ? 1 : 0, price || 0, note || "", photo || "", createdAt);
+  return { ok: true };
+}
+
+function updateEquipment(accountId, itemId, { title, specs, published, price, note, photo }) {
+  const row = db
+    .prepare("SELECT id FROM executor_equipment WHERE id = ? AND account_id = ?")
+    .get(itemId, accountId);
+  if (!row) {
+    return { ok: false };
+  }
+  db.prepare(
+    "UPDATE executor_equipment SET title = ?, specs = ?, published = ?, price = ?, note = ?, photo = ? WHERE id = ? AND account_id = ?"
+  ).run(title, JSON.stringify(specs || {}), published ? 1 : 0, price || 0, note || "", photo || "", itemId, accountId);
+  return { ok: true };
+}
+
+function deleteEquipment(accountId, itemId) {
+  db.prepare("DELETE FROM executor_equipment WHERE id = ? AND account_id = ?").run(itemId, accountId);
+}
+
+// СТС-верификация единицы техники: исполнитель прикладывает фото СТС → на проверку.
+function setEquipmentStsPhoto(accountId, itemId, photo) {
+  const row = db
+    .prepare("SELECT id FROM executor_equipment WHERE id = ? AND account_id = ?")
+    .get(itemId, accountId);
+  if (!row) {
+    return { ok: false };
+  }
+  db.prepare(
+    "UPDATE executor_equipment SET sts_photo = ?, verify_status = 'pending' WHERE id = ? AND account_id = ?"
+  ).run(photo || "", itemId, accountId);
+  return { ok: true };
+}
+
+// Админ: очередь техники на проверку по СТС (с фото СТС и данными исполнителя).
+function listEquipmentVerifications() {
+  return db
+    .prepare(
+      `SELECT e.id, e.service_key, e.title, e.specs, e.sts_photo, e.created_at,
+              a.name AS executor_name, a.id AS executor_id
+         FROM executor_equipment e
+         JOIN accounts a ON a.id = e.account_id
+        WHERE e.verify_status = 'pending'
+        ORDER BY e.created_at`
+    )
+    .all()
+    .map((row) => {
+      let specs = {};
+      try {
+        specs = JSON.parse(row.specs || "{}");
+      } catch {
+        specs = {};
+      }
+      return {
+        id: row.id,
+        serviceKey: row.service_key,
+        title: row.title,
+        specs,
+        stsPhoto: row.sts_photo || "",
+        executorName: row.executor_name,
+        executorId: row.executor_id,
+        createdAt: row.created_at
+      };
+    });
+}
+
+// Админ: решение по СТС. Одобрено → verified (фото СТС стираем — больше не нужно). Иначе rejected.
+function decideEquipmentVerification(itemId, approve) {
+  if (approve) {
+    db.prepare(
+      "UPDATE executor_equipment SET verify_status = 'verified', sts_photo = '' WHERE id = ?"
+    ).run(itemId);
+  } else {
+    db.prepare("UPDATE executor_equipment SET verify_status = 'rejected', sts_photo = '' WHERE id = ?").run(itemId);
+  }
+  return { ok: true };
+}
+
+// Витрина: опубликованная техника исполнителей в городе (опц. по услуге).
+// Возвращает единицу техники + публичные данные исполнителя для прямого контакта.
+function listOffers({ cityId, service, verifiedOnly }) {
+  const rows = db
+    .prepare(
+      `SELECT e.id, e.service_key, e.title, e.specs, e.price, e.note, e.photo, e.verify_status, e.created_at,
+              a.id AS acc_id, a.name, a.phone, a.telegram, a.contact, a.verified, a.available,
+              a.rating_sum, a.rating_count,
+              EXISTS (SELECT 1 FROM orders o WHERE o.executor_id = a.id AND o.status IN ('matched','enroute')) AS busy
+         FROM executor_equipment e
+         JOIN accounts a ON a.id = e.account_id
+        WHERE e.published = 1 AND a.role = 'driver' AND a.banned = 0
+          AND a.city_id = @cityId
+          ${service ? "AND e.service_key = @service" : ""}
+          ${verifiedOnly ? "AND e.verify_status = 'verified'" : ""}
+        ORDER BY (e.verify_status = 'verified') DESC, a.available DESC, busy ASC, a.verified DESC, e.created_at DESC`
+    )
+    .all(service ? { cityId, service } : { cityId });
+  return rows.map((row) => {
+    let specs = {};
+    try {
+      specs = JSON.parse(row.specs || "{}");
+    } catch {
+      specs = {};
+    }
+    return {
+      id: row.id,
+      serviceKey: row.service_key,
+      title: row.title,
+      specs,
+      price: row.price || 0,
+      note: row.note || "",
+      photo: row.photo || "",
+      stsVerified: row.verify_status === "verified",
+      createdAt: row.created_at,
+      executor: {
+        id: row.acc_id,
+        name: row.name,
+        // Контакты не отдаём списком (защита от сбора номеров) — только флаги.
+        // Реальный номер выдаёт /api/offers/:id/contact по явному тапу (с логом).
+        hasPhone: Boolean(row.phone),
+        hasTelegram: Boolean(row.telegram),
+        verified: Boolean(row.verified),
+        available: row.available !== 0,
+        busy: Boolean(row.busy),
+        rating: row.rating_count > 0 ? Math.round((row.rating_sum / row.rating_count) * 10) / 10 : 0,
+        ratingCount: row.rating_count || 0
+      }
+    };
+  });
+}
+
+// Публичные данные объявления по id единицы (для контакта/запроса/жалобы).
+function getOfferPublic(equipmentId) {
+  const row = db
+    .prepare(
+      `SELECT e.id, e.service_key, e.title, e.price, e.published,
+              a.id AS executor_id, a.name AS executor_name, a.phone, a.telegram, a.city_id
+         FROM executor_equipment e JOIN accounts a ON a.id = e.account_id
+        WHERE e.id = ? AND a.role = 'driver' AND a.banned = 0`
+    )
+    .get(equipmentId);
+  if (!row) {
+    return null;
+  }
+  return {
+    id: row.id,
+    serviceKey: row.service_key,
+    title: row.title,
+    price: row.price || 0,
+    published: Boolean(row.published),
+    executorId: row.executor_id,
+    executorName: row.executor_name,
+    phone: row.phone || "",
+    telegram: row.telegram || "",
+    cityId: row.city_id
+  };
+}
+
+// Лог раскрытия контакта по объявлению (тёплый лид + доказательство для споров).
+function addOfferEvent({ id, equipmentId, fromId, executorId, channel, createdAt }) {
+  db.prepare(
+    "INSERT INTO offer_events (id, equipment_id, from_id, executor_id, channel, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(id, equipmentId, fromId, executorId, channel || "", createdAt);
+}
+
+// Сброс СТС-верификации единицы (при подмене машины: смена фото/ТТХ/названия).
+function resetEquipmentVerify(accountId, itemId) {
+  db.prepare(
+    "UPDATE executor_equipment SET verify_status = 'none', sts_photo = '' WHERE id = ? AND account_id = ? AND verify_status IN ('verified','pending')"
+  ).run(itemId, accountId);
+}
+
 function setBio(accountId, bio) {
   db.prepare("UPDATE accounts SET bio = ? WHERE id = ?").run(bio, accountId);
 }
@@ -1248,9 +1514,24 @@ function getExecutorProfile(executorId) {
       author: row.author || "Заказчик"
     }));
   const stats = getExecutorStats(executorId);
+  // Публичный профиль: только безопасные поля. НЕ отдаём email/phone/telegram/contact/
+  // balance/banned — это утечка ПДн и денег любому авторизованному пользователю.
   return {
-    ...account,
+    id: account.id,
+    name: account.name,
+    role: account.role,
+    cityId: account.cityId,
+    rating: account.rating,
+    ratingCount: account.ratingCount,
+    available: account.available,
+    verified: account.verified,
+    verifyStatus: account.verifyStatus,
+    bio: account.bio,
+    avatar: account.avatar,
+    services: account.services,
+    verificationBadges: account.verificationBadges,
     portfolio: listPortfolio(executorId),
+    equipment: listEquipment(executorId).filter((e) => e.published),
     reviews,
     jobsCompleted: stats.jobs
   };
@@ -1940,6 +2221,17 @@ module.exports = {
   listPortfolio,
   addPortfolioItem,
   deletePortfolioItem,
+  listEquipment,
+  addEquipment,
+  updateEquipment,
+  deleteEquipment,
+  setEquipmentStsPhoto,
+  listEquipmentVerifications,
+  decideEquipmentVerification,
+  listOffers,
+  getOfferPublic,
+  addOfferEvent,
+  resetEquipmentVerify,
   setBio,
   getExecutorProfile,
   getDemandAnalytics,

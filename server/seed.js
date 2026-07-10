@@ -4,8 +4,8 @@
 
 const regions = [
   { id: "sakha", name: "Республика Саха (Якутия)", sort: 1 },
-  { id: "tatarstan", name: "Татарстан", sort: 2 },
-  { id: "novosibirsk_obl", name: "Новосибирская область", sort: 3 }
+  { id: "sverdlovsk_obl", name: "Свердловская область", sort: 2 },
+  { id: "tyumen_obl", name: "Тюменская область", sort: 3 }
 ];
 
 const cities = [
@@ -18,36 +18,20 @@ const cities = [
     sort: 1
   },
   {
-    id: "mirny",
-    regionId: "sakha",
-    name: "Мирный",
-    center: [113.964, 62.535],
-    zoom: 12,
-    sort: 2
-  },
-  {
-    id: "kazan",
-    regionId: "tatarstan",
-    name: "Казань",
-    center: [49.106414, 55.796127],
-    zoom: 11,
-    sort: 1
-  },
-  {
-    id: "chelny",
-    regionId: "tatarstan",
-    name: "Набережные Челны",
-    center: [52.39577, 55.743553],
+    id: "ekaterinburg",
+    regionId: "sverdlovsk_obl",
+    name: "Екатеринбург",
+    center: [60.597474, 56.838011],
     zoom: 11,
     sort: 2
   },
   {
-    id: "novosibirsk",
-    regionId: "novosibirsk_obl",
-    name: "Новосибирск",
-    center: [82.92043, 55.030204],
+    id: "tyumen",
+    regionId: "tyumen_obl",
+    name: "Тюмень",
+    center: [65.534328, 57.153033],
     zoom: 11,
-    sort: 1
+    sort: 3
   }
 ];
 
@@ -83,10 +67,8 @@ const services = [
 const allKeys = services.map((s) => s.key);
 const cityServices = {
   yakutsk: allKeys,
-  mirny: ["water", "dump", "crane", "loader", "electrician"],
-  kazan: allKeys,
-  chelny: ["water", "dump", "crane", "transport", "loader", "plumber", "electrician"],
-  novosibirsk: ["water", "septic", "dump", "tractor", "transport", "electrician", "plumber"]
+  ekaterinburg: allKeys,
+  tyumen: allKeys
 };
 
 const orders = [

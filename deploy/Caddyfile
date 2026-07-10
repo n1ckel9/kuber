@@ -1,0 +1,10 @@
+# Caddy сам получает и продлевает HTTPS-сертификат (Let's Encrypt).
+# Замени api.example.ru на свой домен (A-запись должна указывать на IP VPS).
+api.example.ru {
+    encode zstd gzip
+    # Лимит тела запроса под фото (base64 до ~2.8 МБ + запас).
+    request_body {
+        max_size 10MB
+    }
+    reverse_proxy localhost:4000
+}

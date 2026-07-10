@@ -5,6 +5,9 @@ import {
   Bid,
   Catalog,
   Complaint,
+  Equipment,
+  EquipmentVerification,
+  Offer,
   ExecutorProfile,
   LoginPayload,
   Message,
@@ -93,7 +96,7 @@ export async function login(payload: LoginPayload) {
 }
 
 export async function requestOtp(phone: string) {
-  return request<{ sent: boolean; devCode?: string }>("/api/auth/request-otp", {
+  return request<{ sent: boolean; devCode?: string; channel?: string; channelLabel?: string }>("/api/auth/request-otp", {
     method: "POST",
     body: JSON.stringify({ phone })
   });
@@ -123,6 +126,7 @@ export async function updateProfile(payload: {
   services?: ServiceKey[];
   radiusKm?: number;
   available?: boolean;
+  avatar?: string;
 }) {
   return request<Account>("/api/account", {
     method: "PATCH",
@@ -324,6 +328,100 @@ export async function updatePortfolio(payload: {
   return request<ExecutorProfile>("/api/account/portfolio", {
     method: "PATCH",
     body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+// --- Техника исполнителя (ТТХ) ---
+
+type SpecValues = Record<string, string | number | boolean>;
+
+type EquipmentFields = {
+  title?: string;
+  specs?: SpecValues;
+  published?: boolean;
+  price?: number;
+  note?: string;
+  photo?: string;
+};
+
+export async function listEquipment() {
+  return request<Equipment[]>("/api/equipment");
+}
+
+export async function addEquipment(payload: { serviceKey: ServiceKey } & EquipmentFields) {
+  return request<Equipment[]>("/api/equipment", {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+export async function updateEquipment(id: string, payload: EquipmentFields) {
+  return request<Equipment[]>(`/api/equipment/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+export async function deleteEquipment(id: string) {
+  return request<Equipment[]>(`/api/equipment/${id}`, { method: "DELETE" });
+}
+
+// СТС-верификация единицы техники: приложить фото СТС → на проверку.
+export async function verifyEquipmentSts(id: string, photo: string) {
+  return request<Equipment[]>(`/api/equipment/${id}/verify-sts`, {
+    method: "POST",
+    body: JSON.stringify({ photo })
+  });
+}
+
+// Витрина «Техника в наличии»: опубликованные предложения по городу (+ фильтры).
+export async function fetchOffers(cityId: string, service?: ServiceKey | null, verifiedOnly?: boolean) {
+  const params = new URLSearchParams({ cityId });
+  if (service) {
+    params.set("service", service);
+  }
+  if (verifiedOnly) {
+    params.set("verified", "1");
+  }
+  return request<Offer[]>(`/api/offers?${params.toString()}`);
+}
+
+// Раскрыть контакт по объявлению (логируется + пуш исполнителю).
+export async function contactOffer(id: string, channel: "phone" | "telegram") {
+  return request<{ phone: string; telegram: string; executorName: string }>(`/api/offers/${id}/contact`, {
+    method: "POST",
+    body: JSON.stringify({ channel })
+  });
+}
+
+// «Запросить эту технику» → заказ этому исполнителю.
+export async function requestOffer(
+  id: string,
+  payload: { cityId: string; from: string; details: string; price?: number; coordinates?: [number, number] }
+) {
+  return request<Order>(`/api/offers/${id}/request`, {
+    method: "POST",
+    body: JSON.stringify(payload satisfies ApiPayload)
+  });
+}
+
+// Пожаловаться на объявление.
+export async function complainOffer(id: string, text: string) {
+  return request<Complaint>(`/api/offers/${id}/complaint`, {
+    method: "POST",
+    body: JSON.stringify({ text })
+  });
+}
+
+// Админ: очередь техники на проверку по СТС + решение.
+export async function fetchEquipmentVerifications() {
+  return request<EquipmentVerification[]>("/api/admin/equipment-verifications");
+}
+
+export async function decideEquipmentVerification(id: string, approve: boolean) {
+  return request<EquipmentVerification[]>(`/api/admin/equipment-verifications/${id}`, {
+    method: "POST",
+    body: JSON.stringify({ approve })
   });
 }
 

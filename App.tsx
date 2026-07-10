@@ -91,6 +91,17 @@ import {
   toggleFavorite as toggleFavoriteOnServer,
   topUpWallet,
   updatePortfolio,
+  listEquipment,
+  addEquipment,
+  updateEquipment,
+  deleteEquipment,
+  verifyEquipmentSts,
+  fetchOffers,
+  contactOffer,
+  requestOffer,
+  complainOffer,
+  fetchEquipmentVerifications,
+  decideEquipmentVerification,
   updateProfile,
   verifyAccount,
   withdrawWallet
@@ -110,6 +121,9 @@ import {
   Category,
   City,
   Complaint,
+  Equipment,
+  EquipmentVerification,
+  Offer,
   ExecutorProfile,
   Order,
   OrderStatus,
@@ -131,6 +145,7 @@ import {
 import { pickImageAsBase64 } from "./src/imageUpload";
 import { OnboardingModal } from "./src/OnboardingModal";
 import { LegalScreen } from "./src/LegalScreen";
+import { equipmentSchema, hasEquipmentSchema, summarizeSpecs } from "./src/equipmentSpecs";
 
 // Форматирование без Intl (на Hermes/Android Intl ограничен и может падать).
 const rub = {
@@ -171,6 +186,9 @@ export default function App() {
   const [selectedService, setSelectedService] = useState<ServiceKey>("water");
 
   const [orders, setOrders] = useState<Order[]>([]);
+  // Активный заказ «в пути» — трек координат не должен зависеть от вкладки
+  // (список orders меняется между биржей/заказами/картой).
+  const [activeEnrouteId, setActiveEnrouteId] = useState("");
   const [detailId, setDetailId] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [serverState, setServerState] = useState<"sync" | "offline">("sync");
@@ -388,13 +406,17 @@ export default function App() {
   }, [account]);
 
   // Исполнитель «в пути» — периодически шлём координаты (раз в 20с).
-  const myEnrouteId = useMemo(
-    () =>
-      role === "driver" && account
-        ? orders.find((o) => o.status === "enroute" && o.executorId === account.id)?.id ?? ""
-        : "",
-    [role, account, orders]
-  );
+  // Берём заказ из выделенного состояния (не зависит от вкладки), а если его нет —
+  // из текущего списка (напр. после холодного старта на вкладке «Заказы»).
+  const myEnrouteId = useMemo(() => {
+    if (role !== "driver" || !account) {
+      return "";
+    }
+    if (activeEnrouteId) {
+      return activeEnrouteId;
+    }
+    return orders.find((o) => o.status === "enroute" && o.executorId === account.id)?.id ?? "";
+  }, [role, account, orders, activeEnrouteId]);
   useEffect(() => {
     if (!myEnrouteId) {
       return;
@@ -536,6 +558,7 @@ export default function App() {
     await clearToken();
     setAccount(null);
     setOrders([]);
+    setActiveEnrouteId("");
     setDevMode(false);
     setViewMode("orders");
   }
@@ -677,14 +700,14 @@ export default function App() {
     }
   }
 
-  async function createOrder(repeatDays = 0) {
+  async function createOrder(repeatDays = 0): Promise<boolean> {
     setGeoError("");
     const numericPrice = Number(price.replace(/\D/g, ""));
     if (!from.trim() || !details.trim() || !currentCity || numericPrice < 1 || numericPrice > 1000000) {
-      return;
+      return false;
     }
     if (opBusy.current.createOrder) {
-      return;
+      return false;
     }
     opBusy.current.createOrder = true;
     const payload = {
@@ -712,6 +735,7 @@ export default function App() {
       setPrice("");
       resetLocation();
       setServerState("sync");
+      return true;
     } catch (e) {
       // Сервер не смог определить адрес — просим уточнить точку (не «уходим в офлайн»).
       if (e instanceof ApiError && e.status === 400) {
@@ -719,6 +743,7 @@ export default function App() {
       } else {
         setServerState("offline");
       }
+      return false;
     } finally {
       opBusy.current.createOrder = false;
     }
@@ -733,9 +758,9 @@ export default function App() {
     }
   }
 
-  async function sendBid(orderId: string, bidPrice: number, eta: string) {
+  async function sendBid(orderId: string, bidPrice: number, eta: string): Promise<boolean> {
     if (opBusy.current[`bid_${orderId}`]) {
-      return;
+      return false;
     }
     opBusy.current[`bid_${orderId}`] = true;
     setBidError("");
@@ -753,12 +778,14 @@ export default function App() {
         setAccount((current) => (current ? { ...current, balance: (current.balance ?? 0) - fee } : current));
       }
       setServerState("sync");
+      return true;
     } catch (e) {
       if (e instanceof ApiError && (e.status === 402 || e.status === 409)) {
         setBidError(e.message);
       } else {
         setServerState("offline");
       }
+      return false;
     } finally {
       opBusy.current[`bid_${orderId}`] = false;
     }
@@ -812,6 +839,9 @@ export default function App() {
   async function executorFinish(orderId: string) {
     try {
       updateOrderInList(await finishOrderOnServer(orderId));
+      if (activeEnrouteId === orderId) {
+        setActiveEnrouteId(""); // доехал — прекращаем трек
+      }
       setServerState("sync");
     } catch {
       setServerState("offline");
@@ -848,6 +878,9 @@ export default function App() {
   async function cancelOrder(orderId: string, reason: string) {
     try {
       updateOrderInList(await cancelOrderOnServer(orderId, reason));
+      if (activeEnrouteId === orderId) {
+        setActiveEnrouteId("");
+      }
       setServerState("sync");
     } catch {
       setServerState("offline");
@@ -857,6 +890,7 @@ export default function App() {
   async function markEnroute(orderId: string) {
     try {
       updateOrderInList(await setOrderEnroute(orderId));
+      setActiveEnrouteId(orderId); // трекаем координаты независимо от вкладки
       setServerState("sync");
     } catch {
       setServerState("offline");
@@ -919,6 +953,7 @@ export default function App() {
       services: ServiceKey[];
       radiusKm: number;
       available: boolean;
+      avatar: string;
     },
     onError?: (message: string) => void
   ) {
@@ -967,6 +1002,7 @@ export default function App() {
         ]
       : [
           { id: "orders", label: "Заявки" },
+          { id: "market", label: "Витрина" },
           { id: "map", label: "Карта" },
           { id: "account", label: "Профиль" }
         ];
@@ -1058,6 +1094,10 @@ export default function App() {
                   });
                 }}
               />
+            </ScrollView>
+          ) : viewMode === "market" ? (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
+              <MarketScreen cityId={cityId} cityName={currentCity?.name ?? ""} catalog={catalog} />
             </ScrollView>
           ) : viewMode === "account" ? (
             <ScrollView
@@ -1439,9 +1479,15 @@ export default function App() {
                           if (!n.orderId) {
                             return;
                           }
+                          // Отменённый заказ скрыт из лент, а по отклонённому отклику
+                          // у исполнителя нет доступа к заказу — открывать нечего.
+                          if (n.type === "cancelled" || (role === "driver" && n.type === "rejected")) {
+                            return;
+                          }
                           // Переходим на вкладку, где живёт этот заказ, и открываем его.
-                          // Исполнителю принятые/рабочие заказы — в «Заказах».
-                          if (role === "driver" && n.type !== "bid") {
+                          // Исполнителю: принятые/рабочие — в «Заказах»; открытый запрос
+                          // техники (quick) живёт на бирже (вкладка «Биржа»/orders).
+                          if (role === "driver" && n.type !== "bid" && n.type !== "quick") {
                             setViewMode("jobs");
                           } else {
                             setViewMode("orders");
@@ -1531,7 +1577,7 @@ function CreateOrderPanel({
   onSelectSuggestion: (item: GeocodeResult) => void;
   onChangeDetails: (value: string) => void;
   onChangePrice: (value: string) => void;
-  onSubmit: (repeatDays: number) => void;
+  onSubmit: (repeatDays: number) => void | Promise<boolean>;
   hasLocation: boolean;
   locationLabel: string;
   onPickLocation: () => void;
@@ -1794,7 +1840,17 @@ function CreateOrderPanel({
         ) : null}
       </View>
 
-      <Pressable style={ui.primaryButton} onPress={() => onSubmit(repeatDays)}>
+      <Pressable
+        style={ui.primaryButton}
+        onPress={async () => {
+          const ok = await onSubmit(repeatDays);
+          // Сбрасываем повтор только при успешной публикации — иначе следующий
+          // одноразовый заказ втихую заведёт вторую подписку.
+          if (ok) {
+            setRepeatDays(0);
+          }
+        }}
+      >
         <MaterialCommunityIcons name="arrow-up-circle" size={20} color={colors.accentText} />
         <Text style={ui.primaryButtonText}>
           {repeatDays > 0 ? "Опубликовать и подписаться" : "Опубликовать"}
@@ -1985,9 +2041,13 @@ function ExecutorProfileModal({
             ) : (
               <View style={{ gap: 14 }}>
                 <View style={styles.rowCenter}>
-                  <View style={styles.avatar}>
-                    <Text style={styles.avatarText}>{profile.name.slice(0, 1).toUpperCase()}</Text>
-                  </View>
+                  {profile.avatar ? (
+                    <Image source={{ uri: profile.avatar }} style={styles.avatarImg} resizeMode="cover" />
+                  ) : (
+                    <View style={styles.avatar}>
+                      <Text style={styles.avatarText}>{profile.name.slice(0, 1).toUpperCase()}</Text>
+                    </View>
+                  )}
                   <View style={styles.flex}>
                     <View style={styles.bidNameRow}>
                       <Text style={styles.panelTitle}>{profile.name}</Text>
@@ -2003,6 +2063,14 @@ function ExecutorProfileModal({
                           : "пока нет отзывов"}
                       </Text>
                     </View>
+                    <Text
+                      style={[
+                        styles.offerStatusText,
+                        { color: profile.available === false ? colors.inkFaint : colors.positive, marginTop: 4 }
+                      ]}
+                    >
+                      {profile.available === false ? "● Не на линии" : "● На линии"}
+                    </Text>
                   </View>
                   {profile.id ? (
                     <Pressable hitSlop={8} onPress={() => onToggleFavorite(profile.id as string)}>
@@ -2067,6 +2135,28 @@ function ExecutorProfileModal({
                   <View style={ui.inputGroup}>
                     <Text style={ui.label}>О себе</Text>
                     <Text style={styles.details}>{profile.bio}</Text>
+                  </View>
+                ) : null}
+
+                {profile.equipment && profile.equipment.length > 0 ? (
+                  <View style={ui.inputGroup}>
+                    <Text style={ui.label}>Техника</Text>
+                    {profile.equipment.map((eq) => {
+                      const svc = serviceByKey(eq.serviceKey);
+                      const spec = summarizeSpecs(eq.serviceKey, eq.specs);
+                      return (
+                        <View key={eq.id} style={styles.portfolioItem}>
+                          <MaterialCommunityIcons name={svc.icon} size={18} color={svc.accent} style={styles.equipIcon} />
+                          <View style={styles.flex}>
+                            <Text style={styles.portfolioTitle}>{eq.title || svc.title}</Text>
+                            <Text style={styles.panelSubtitle}>
+                              {svc.title}
+                              {spec ? ` · ${spec}` : ""}
+                            </Text>
+                          </View>
+                        </View>
+                      );
+                    })}
                   </View>
                 ) : null}
 
@@ -2153,7 +2243,7 @@ function OrderDetails({
   onToggleFavorite: (executorId: string) => void;
   onAcceptBid: (bidId: string) => void;
   onRejectBid: (bidId: string) => void;
-  onSendBid: (price: number, eta: string) => void;
+  onSendBid: (price: number, eta: string) => void | Promise<boolean>;
   onDelete: () => void;
   onFinish: () => void;
   onConfirm: () => void;
@@ -2210,13 +2300,17 @@ function OrderDetails({
   }, [order.bids]);
   const bestBidId = order.bids.length >= 2 ? rankedBids[0]?.id ?? null : null;
 
-  function submitBid() {
+  async function submitBid() {
     const numeric = Number(bidPrice.replace(/\D/g, ""));
     if (!numeric) {
       return;
     }
-    onSendBid(numeric, bidEta.trim() || "40 мин");
-    setBidPrice("");
+    // Чистим поле только при успешной отправке — иначе на ошибке (мало монет и т.п.)
+    // исполнитель теряет набранную цену.
+    const ok = await onSendBid(numeric, bidEta.trim() || "40 мин");
+    if (ok) {
+      setBidPrice("");
+    }
   }
 
   return (
@@ -2856,6 +2950,721 @@ function PortfolioEditor({ account }: { account: Account }) {
   );
 }
 
+// Витрина «Техника в наличии»: заказчик листает предложения исполнителей по городу.
+function MarketScreen({ cityId, cityName, catalog }: { cityId: string; cityName: string; catalog: Catalog }) {
+  const [offers, setOffers] = useState<Offer[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<ServiceKey | null>(null);
+  const [verifiedOnly, setVerifiedOnly] = useState(false);
+  // Профиль исполнителя (модалка), запрос техники, жалоба.
+  const [profile, setProfile] = useState<ExecutorProfile | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [reqOffer, setReqOffer] = useState<Offer | null>(null);
+  const [reqFrom, setReqFrom] = useState("");
+  const [reqDetails, setReqDetails] = useState("");
+  const [reqPrice, setReqPrice] = useState("");
+  const [reqBusy, setReqBusy] = useState(false);
+  const [reqErr, setReqErr] = useState("");
+  const [reqDone, setReqDone] = useState(false);
+  const [cmpOffer, setCmpOffer] = useState<Offer | null>(null);
+  const [cmpText, setCmpText] = useState("");
+  const [cmpBusy, setCmpBusy] = useState(false);
+  const [cmpDone, setCmpDone] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!cityId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    fetchOffers(cityId, null)
+      .then((list) => {
+        if (!cancelled) setOffers(list);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cityId]);
+
+  const presentKeys = Array.from(new Set(offers.map((o) => o.serviceKey)));
+  const filterServices = catalog.services.filter((s) => presentKeys.includes(s.key));
+  const hasVerified = offers.some((o) => o.stsVerified);
+  const shown = offers.filter(
+    (o) => (!filter || o.serviceKey === filter) && (!verifiedOnly || o.stsVerified)
+  );
+
+  // Контакт по тапу: раскрываем номер через сервер (логируется + пуш исполнителю).
+  async function contact(o: Offer, channel: "phone" | "telegram") {
+    try {
+      const c = await contactOffer(o.id, channel);
+      if (channel === "phone" && c.phone) {
+        void Linking.openURL(`tel:+${c.phone.replace(/\D/g, "")}`).catch(() => {});
+      } else if (channel === "telegram" && c.telegram) {
+        void Linking.openURL(`https://t.me/${c.telegram.replace(/^@/, "").trim()}`).catch(() => {});
+      }
+    } catch {
+      // тихо
+    }
+  }
+
+  async function openProfile(id: string) {
+    setProfileOpen(true);
+    setProfileLoading(true);
+    setProfile(null);
+    try {
+      setProfile(await fetchExecutorProfile(id));
+    } catch {
+      // не удалось загрузить — закрываем, чтобы не висел вечный спиннер
+      setProfileOpen(false);
+    } finally {
+      setProfileLoading(false);
+    }
+  }
+
+  function openRequest(o: Offer) {
+    setReqOffer(o);
+    setReqFrom("");
+    setReqDetails("");
+    setReqPrice(o.price ? String(o.price) : "");
+    setReqErr("");
+    setReqDone(false);
+  }
+
+  async function submitRequest() {
+    if (!reqOffer) {
+      return;
+    }
+    if (!reqFrom.trim() || !reqDetails.trim()) {
+      setReqErr("Укажите адрес и что нужно");
+      return;
+    }
+    setReqBusy(true);
+    setReqErr("");
+    try {
+      await requestOffer(reqOffer.id, {
+        cityId,
+        from: reqFrom.trim(),
+        details: reqDetails.trim(),
+        price: Number(reqPrice) || undefined
+      });
+      setReqDone(true);
+    } catch (e) {
+      setReqErr(e instanceof ApiError ? e.message : "Не удалось отправить запрос");
+    } finally {
+      setReqBusy(false);
+    }
+  }
+
+  async function submitComplaint() {
+    if (!cmpOffer || !cmpText.trim()) {
+      return;
+    }
+    setCmpBusy(true);
+    try {
+      await complainOffer(cmpOffer.id, cmpText.trim());
+      setCmpDone(true);
+    } catch {
+      // тихо
+    } finally {
+      setCmpBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <View style={ui.card}>
+        <Text style={styles.panelTitle}>Техника в наличии</Text>
+        <Text style={styles.panelSubtitle}>
+          Предложения исполнителей{cityName ? ` в городе ${cityName}` : ""}. Запросите технику или свяжитесь напрямую.
+        </Text>
+
+        {filterServices.length > 0 ? (
+          <View style={styles.pillWrap}>
+            <Pressable onPress={() => setFilter(null)} style={[ui.pill, !filter && ui.pillActive]}>
+              <Text style={[ui.pillText, !filter && ui.pillTextActive]}>Все</Text>
+            </Pressable>
+            {filterServices.map((s) => {
+              const on = filter === s.key;
+              return (
+                <Pressable key={s.key} onPress={() => setFilter(s.key)} style={[ui.pill, on && ui.pillActive]}>
+                  <Text style={[ui.pillText, on && ui.pillTextActive]}>{s.title}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        ) : null}
+
+        {hasVerified ? (
+          <Pressable
+            onPress={() => setVerifiedOnly((v) => !v)}
+            style={[ui.pill, verifiedOnly && ui.pillActive, styles.verifiedFilter]}
+          >
+            <MaterialCommunityIcons
+              name="shield-check"
+              size={15}
+              color={verifiedOnly ? colors.accentText : colors.verified}
+            />
+            <Text style={[ui.pillText, verifiedOnly && ui.pillTextActive]}>Только проверенные по СТС</Text>
+          </Pressable>
+        ) : null}
+      </View>
+
+      {loading ? (
+        <Text style={styles.locationNote}>Загрузка…</Text>
+      ) : shown.length === 0 ? (
+        <View style={ui.card}>
+          <Text style={styles.panelSubtitle}>
+            {filter || verifiedOnly
+              ? "Нет техники по выбранному фильтру. Сбросьте фильтр, чтобы увидеть все предложения."
+              : `Пока нет опубликованной техники${cityName ? ` в городе ${cityName}` : ""}. Исполнители появятся здесь, когда разместят предложения.`}
+          </Text>
+          {filter || verifiedOnly ? (
+            <Pressable
+              style={ui.ghostButton}
+              onPress={() => {
+                setFilter(null);
+                setVerifiedOnly(false);
+              }}
+            >
+              <Text style={ui.ghostButtonText}>Сбросить фильтр</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : (
+        shown.map((o) => {
+          const svc = serviceByKey(o.serviceKey);
+          const spec = summarizeSpecs(o.serviceKey, o.specs);
+          return (
+            <View key={o.id} style={ui.card}>
+              {o.photo ? <Image source={{ uri: o.photo }} style={styles.offerPhoto} resizeMode="cover" /> : null}
+              <Pressable style={styles.offerHead} onPress={() => openProfile(o.executor.id)}>
+                <MaterialCommunityIcons name={svc.icon} size={22} color={svc.accent} />
+                <View style={styles.flex}>
+                  <Text style={styles.portfolioTitle}>
+                    {o.title || svc.title}
+                    {o.price ? (
+                      <Text style={styles.offerPrice}>{`  от ${o.price.toLocaleString("ru-RU")} ₽`}</Text>
+                    ) : (
+                      <Text style={styles.offerPriceSoft}>{"  цена договорная"}</Text>
+                    )}
+                  </Text>
+                  <Text style={styles.panelSubtitle}>
+                    {svc.title}
+                    {spec ? ` · ${spec}` : ""}
+                  </Text>
+                  {o.stsVerified ? (
+                    <View style={styles.offerVerifyBadge}>
+                      <MaterialCommunityIcons name="shield-check" size={14} color={colors.verified} />
+                      <Text style={styles.offerVerifyText}>Техника проверена по СТС</Text>
+                    </View>
+                  ) : null}
+                </View>
+                <MaterialCommunityIcons name="chevron-right" size={20} color={colors.inkFaint} />
+              </Pressable>
+
+              <Pressable style={styles.offerExecRow} onPress={() => openProfile(o.executor.id)}>
+                <MaterialCommunityIcons name="account-circle-outline" size={18} color={colors.inkSoft} />
+                <Text style={styles.offerExecName} numberOfLines={1}>
+                  {o.executor.name}
+                </Text>
+                {o.executor.verified ? (
+                  <MaterialCommunityIcons name="check-decagram" size={15} color={colors.verified} />
+                ) : null}
+                {o.executor.ratingCount > 0 ? (
+                  <Text style={styles.offerRating}>★ {o.executor.rating.toFixed(1)}</Text>
+                ) : null}
+              </Pressable>
+
+              <View style={styles.offerStatusRow}>
+                <View
+                  style={[
+                    styles.statusDot,
+                    { backgroundColor: !o.executor.available ? colors.inkFaint : o.executor.busy ? colors.star : colors.positive }
+                  ]}
+                />
+                <Text style={styles.offerStatusText}>
+                  {!o.executor.available ? "Не на линии" : o.executor.busy ? "Занят на заказе" : "Свободен сейчас"}
+                </Text>
+              </View>
+
+              {o.note ? <Text style={styles.offerNote}>{o.note}</Text> : null}
+
+              <Pressable style={[ui.primaryButton, styles.offerRequestBtn]} onPress={() => openRequest(o)}>
+                <MaterialCommunityIcons name="clipboard-check-outline" size={18} color={colors.accentText} />
+                <Text style={ui.primaryButtonText}>Запросить технику</Text>
+              </Pressable>
+
+              <View style={styles.offerContactRow}>
+                {o.executor.hasPhone ? (
+                  <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => contact(o, "phone")}>
+                    <MaterialCommunityIcons name="phone" size={16} color={colors.ink} />
+                    <Text style={ui.ghostButtonText}>Позвонить</Text>
+                  </Pressable>
+                ) : null}
+                {o.executor.hasTelegram ? (
+                  <Pressable style={[ui.ghostButton, styles.flex]} onPress={() => contact(o, "telegram")}>
+                    <MaterialCommunityIcons name="send" size={16} color={colors.ink} />
+                    <Text style={ui.ghostButtonText}>Telegram</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+
+              <Pressable hitSlop={6} onPress={() => { setCmpOffer(o); setCmpText(""); setCmpDone(false); }}>
+                <Text style={styles.offerComplain}>Пожаловаться на объявление</Text>
+              </Pressable>
+            </View>
+          );
+        })
+      )}
+
+      <ExecutorProfileModal
+        visible={profileOpen}
+        loading={profileLoading}
+        profile={profile}
+        favorites={[]}
+        onToggleFavorite={() => {}}
+        onClose={() => setProfileOpen(false)}
+      />
+
+      {/* Запрос техники → заказ этому исполнителю */}
+      <Modal visible={Boolean(reqOffer)} transparent animationType="slide" onRequestClose={() => setReqOffer(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Запросить технику</Text>
+              <Pressable style={styles.modalClose} onPress={() => setReqOffer(null)}>
+                <MaterialCommunityIcons name="close" size={20} color={colors.ink} />
+              </Pressable>
+            </View>
+            {reqDone ? (
+              <View style={styles.modalContent}>
+                <Text style={styles.panelSubtitle}>Запрос отправлен — исполнитель уведомлён. Заявка появится в разделе «Заявки».</Text>
+                <Pressable style={ui.primaryButton} onPress={() => setReqOffer(null)}>
+                  <Text style={ui.primaryButtonText}>Готово</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <View style={styles.modalContent}>
+                <Text style={styles.panelSubtitle}>
+                  {reqOffer?.title || "Техника"} · {reqOffer ? serviceByKey(reqOffer.serviceKey).title : ""}
+                </Text>
+                <View style={ui.inputGroup}>
+                  <Text style={ui.label}>Адрес</Text>
+                  <TextInput value={reqFrom} onChangeText={setReqFrom} placeholder="Куда подать технику" placeholderTextColor={colors.inkFaint} style={ui.input} />
+                </View>
+                <View style={ui.inputGroup}>
+                  <Text style={ui.label}>Что нужно</Text>
+                  <TextInput value={reqDetails} onChangeText={setReqDetails} placeholder="Опишите задачу" placeholderTextColor={colors.inkFaint} multiline style={[ui.input, ui.textArea]} />
+                </View>
+                <View style={ui.inputGroup}>
+                  <Text style={ui.label}>Ваша цена, ₽</Text>
+                  <TextInput value={reqPrice} onChangeText={(t) => setReqPrice(t.replace(/[^0-9]/g, ""))} placeholder="напр. 3000" placeholderTextColor={colors.inkFaint} keyboardType="number-pad" style={ui.input} />
+                </View>
+                {reqErr ? <Text style={ui.errorText}>{reqErr}</Text> : null}
+                <Pressable style={ui.primaryButton} onPress={submitRequest} disabled={reqBusy}>
+                  <Text style={ui.primaryButtonText}>{reqBusy ? "Отправка…" : "Отправить запрос"}</Text>
+                </Pressable>
+              </View>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Жалоба на объявление */}
+      <Modal visible={Boolean(cmpOffer)} transparent animationType="fade" onRequestClose={() => setCmpOffer(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalSheet}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Пожаловаться</Text>
+              <Pressable style={styles.modalClose} onPress={() => setCmpOffer(null)}>
+                <MaterialCommunityIcons name="close" size={20} color={colors.ink} />
+              </Pressable>
+            </View>
+            <View style={styles.modalContent}>
+              {cmpDone ? (
+                <>
+                  <Text style={styles.panelSubtitle}>Спасибо, жалоба отправлена на модерацию.</Text>
+                  <Pressable style={ui.primaryButton} onPress={() => setCmpOffer(null)}>
+                    <Text style={ui.primaryButtonText}>Готово</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <TextInput value={cmpText} onChangeText={setCmpText} placeholder="Что не так с объявлением?" placeholderTextColor={colors.inkFaint} multiline style={[ui.input, ui.textArea]} />
+                  <Pressable style={ui.primaryButton} onPress={submitComplaint} disabled={cmpBusy || !cmpText.trim()}>
+                    <Text style={ui.primaryButtonText}>{cmpBusy ? "Отправка…" : "Отправить жалобу"}</Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
+// Техника исполнителя: ТТХ спецтехники по каждой его категории.
+function EquipmentEditor({ account, catalog }: { account: Account; catalog: Catalog }) {
+  const [items, setItems] = useState<Equipment[]>([]);
+  const [serviceKey, setServiceKey] = useState<ServiceKey | null>(null);
+  const [title, setTitle] = useState("");
+  const [specs, setSpecs] = useState<Record<string, string | number | boolean>>({});
+  const [published, setPublished] = useState(false);
+  const [price, setPrice] = useState("");
+  const [note, setNote] = useState("");
+  const [photo, setPhoto] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Категории исполнителя, у которых есть схема ТТХ.
+  const myServices = catalog.services.filter(
+    (s) => (account.services ?? []).includes(s.key) && hasEquipmentSchema(s.key)
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    listEquipment()
+      .then((list) => {
+        if (!cancelled) setItems(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Стартовая категория — первая доступная.
+  useEffect(() => {
+    if (!serviceKey && myServices.length > 0) {
+      setServiceKey(myServices[0].key);
+    }
+  }, [myServices, serviceKey]);
+
+  const schema = serviceKey ? equipmentSchema(serviceKey) : null;
+
+  function resetForm() {
+    setEditingId(null);
+    setTitle("");
+    setSpecs({});
+    setPublished(false);
+    setPrice("");
+    setNote("");
+    setPhoto(null);
+  }
+
+  function startEdit(item: Equipment) {
+    setEditingId(item.id);
+    setServiceKey(item.serviceKey);
+    setTitle(item.title);
+    setSpecs({ ...item.specs });
+    setPublished(item.published);
+    setPrice(item.price ? String(item.price) : "");
+    setNote(item.note ?? "");
+    setPhoto(item.photo || null);
+    setError("");
+  }
+
+  // СТС-верификация: выбрать фото свидетельства → отправить на проверку.
+  async function uploadSts(item: Equipment) {
+    const result = await pickImageAsBase64();
+    if (!result.ok) {
+      if (result.error) setError(result.error);
+      return;
+    }
+    setBusy(true);
+    try {
+      setItems(await verifyEquipmentSts(item.id, result.dataUrl));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Не удалось отправить СТС.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function setField(key: string, value: string | number | boolean) {
+    setSpecs((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function submit() {
+    if (!serviceKey) {
+      return;
+    }
+    setError("");
+    setBusy(true);
+    const fields = {
+      title: title.trim(),
+      specs,
+      published,
+      price: Number(price) || 0,
+      note: note.trim(),
+      photo: photo ?? ""
+    };
+    try {
+      const list = editingId
+        ? await updateEquipment(editingId, fields)
+        : await addEquipment({ serviceKey, ...fields });
+      setItems(list);
+      resetForm();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Не удалось сохранить.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Быстрая публикация/снятие единицы с витрины.
+  async function togglePublish(item: Equipment) {
+    setError("");
+    setBusy(true);
+    try {
+      setItems(await updateEquipment(item.id, { published: !item.published }));
+    } catch (e) {
+      // Напр. сервер требует заполнить обязательные ТТХ для публикации — покажем причину.
+      setError(e instanceof ApiError ? e.message : "Не удалось изменить публикацию.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    try {
+      setItems(await deleteEquipment(id));
+      if (editingId === id) {
+        resetForm();
+      }
+    } catch {
+      // молча — можно повторить
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (myServices.length === 0) {
+    return (
+      <View style={ui.card}>
+        <Text style={styles.panelTitle}>Моя техника</Text>
+        <Text style={styles.panelSubtitle}>
+          Отметьте в услугах выше категории со спецтехникой — тогда сможете указать её ТТХ.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={ui.card}>
+      <Text style={styles.panelTitle}>Моя техника</Text>
+      <Text style={styles.panelSubtitle}>ТТХ по каждой категории. Заказчик видит их при выборе исполнителя.</Text>
+
+      {myServices.map((s) => {
+        const units = items.filter((it) => it.serviceKey === s.key);
+        return (
+          <View key={s.key} style={ui.inputGroup}>
+            <Text style={ui.label}>
+              {s.title} ({units.length})
+            </Text>
+            {units.length === 0 ? (
+              <Text style={styles.locationNote}>Пока нет техники в этой категории.</Text>
+            ) : (
+              units.map((it) => (
+                <View key={it.id} style={styles.portfolioItem}>
+                  {it.photo ? (
+                    <Image source={{ uri: it.photo }} style={styles.equipThumb} resizeMode="cover" />
+                  ) : null}
+                  <View style={styles.flex}>
+                    <Text style={styles.portfolioTitle}>{it.title || s.title}</Text>
+                    <Text style={styles.panelSubtitle}>
+                      {summarizeSpecs(it.serviceKey, it.specs) || "без ТТХ"}
+                    </Text>
+                    {it.published ? (
+                      <Text style={styles.equipPublished}>
+                        ● в витрине · {it.price ? `от ${it.price.toLocaleString("ru-RU")} ₽` : "цена договорная"}
+                      </Text>
+                    ) : null}
+                    {it.verifyStatus === "verified" ? (
+                      <Text style={styles.equipVerified}>✓ проверено по СТС</Text>
+                    ) : it.verifyStatus === "pending" ? (
+                      <Text style={styles.equipPending}>СТС на проверке…</Text>
+                    ) : (
+                      <Pressable hitSlop={6} onPress={() => uploadSts(it)} disabled={busy}>
+                        <Text style={styles.equipStsLink}>
+                          {it.verifyStatus === "rejected" ? "СТС отклонён — приложить заново" : "Проверить по СТС"}
+                        </Text>
+                      </Pressable>
+                    )}
+                  </View>
+                  <Pressable hitSlop={8} onPress={() => togglePublish(it)} style={styles.equipAction} disabled={busy}>
+                    <MaterialCommunityIcons
+                      name={it.published ? "eye-check" : "eye-plus-outline"}
+                      size={20}
+                      color={it.published ? colors.positive : colors.inkSoft}
+                    />
+                  </Pressable>
+                  <Pressable hitSlop={8} onPress={() => startEdit(it)} style={styles.equipAction}>
+                    <MaterialCommunityIcons name="pencil-outline" size={20} color={colors.inkSoft} />
+                  </Pressable>
+                  <Pressable hitSlop={8} onPress={() => remove(it.id)}>
+                    <MaterialCommunityIcons name="close-circle-outline" size={22} color={colors.warning} />
+                  </Pressable>
+                </View>
+              ))
+            )}
+          </View>
+        );
+      })}
+
+      <View style={ui.inputGroup}>
+        <Text style={ui.label}>{editingId ? "Редактирование единицы" : "Добавить технику"}</Text>
+
+        {!editingId ? (
+          <View style={styles.pillWrap}>
+            {myServices.map((s) => {
+              const on = serviceKey === s.key;
+              return (
+                <Pressable
+                  key={s.key}
+                  onPress={() => {
+                    setServiceKey(s.key);
+                    setSpecs({});
+                  }}
+                  style={[styles.specChip, on && { borderColor: s.accent, backgroundColor: tint(s.accent) }]}
+                >
+                  <MaterialCommunityIcons name={on ? "check" : s.icon} size={16} color={on ? s.accent : colors.inkSoft} />
+                  <Text style={styles.specChipText}>{s.title}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        ) : null}
+
+        <TextInput
+          value={title}
+          onChangeText={setTitle}
+          placeholder="Название (напр. «КамАЗ 65115» или гос. номер)"
+          placeholderTextColor={colors.inkFaint}
+          maxLength={80}
+          style={ui.input}
+        />
+
+        <PhotoPicker label="Фото техники (необязательно)" value={photo} onChange={setPhoto} />
+
+        {schema?.fields.map((f) => (
+          <View key={f.key} style={styles.equipField}>
+            <Text style={ui.label}>
+              {f.label}
+              {f.unit ? `, ${f.unit}` : ""}
+              {f.required ? <Text style={styles.reqMark}> * для витрины</Text> : null}
+            </Text>
+            {f.type === "number" ? (
+              <TextInput
+                value={specs[f.key] === undefined ? "" : String(specs[f.key])}
+                onChangeText={(t) => setField(f.key, t.replace(/[^0-9.,]/g, "").replace(",", "."))}
+                placeholder="0"
+                placeholderTextColor={colors.inkFaint}
+                keyboardType="decimal-pad"
+                style={ui.input}
+              />
+            ) : f.type === "text" ? (
+              <TextInput
+                value={specs[f.key] === undefined ? "" : String(specs[f.key])}
+                onChangeText={(t) => setField(f.key, t)}
+                placeholder="…"
+                placeholderTextColor={colors.inkFaint}
+                maxLength={200}
+                style={ui.input}
+              />
+            ) : f.type === "bool" ? (
+              <Switch
+                value={Boolean(specs[f.key])}
+                onValueChange={(v) => setField(f.key, v)}
+                trackColor={{ true: colors.ink, false: colors.line }}
+                thumbColor={colors.surface}
+              />
+            ) : (
+              <View style={styles.pillWrap}>
+                {(f.options ?? []).map((opt) => {
+                  const on = specs[f.key] === opt;
+                  return (
+                    <Pressable key={opt} onPress={() => setField(f.key, opt)} style={[ui.pill, on && ui.pillActive]}>
+                      <Text style={[ui.pillText, on && ui.pillTextActive]}>{opt}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+          </View>
+        ))}
+
+        <View style={styles.equipPublishRow}>
+          <View style={styles.flex}>
+            <Text style={ui.label}>Разместить в витрине «Техника в наличии»</Text>
+            <Text style={styles.panelSubtitle}>Заказчики увидят предложение и свяжутся напрямую.</Text>
+          </View>
+          <Switch
+            value={published}
+            onValueChange={setPublished}
+            trackColor={{ true: colors.ink, false: colors.line }}
+            thumbColor={colors.surface}
+          />
+        </View>
+
+        {published ? (
+          <>
+            <View style={styles.equipField}>
+              <Text style={ui.label}>Цена от, ₽ (необязательно)</Text>
+              <TextInput
+                value={price}
+                onChangeText={(t) => setPrice(t.replace(/[^0-9]/g, ""))}
+                placeholder="напр. 3000"
+                placeholderTextColor={colors.inkFaint}
+                keyboardType="number-pad"
+                style={ui.input}
+              />
+            </View>
+            <View style={styles.equipField}>
+              <Text style={ui.label}>Комментарий (район, условия)</Text>
+              <TextInput
+                value={note}
+                onChangeText={setNote}
+                placeholder="напр. работаю по городу и пригороду, нал/безнал"
+                placeholderTextColor={colors.inkFaint}
+                maxLength={300}
+                multiline
+                style={[ui.input, ui.textArea]}
+              />
+            </View>
+          </>
+        ) : null}
+
+        {error ? <Text style={ui.errorText}>{error}</Text> : null}
+        <View style={styles.equipButtons}>
+          <Pressable style={[ui.primaryButton, styles.flex]} onPress={submit} disabled={busy}>
+            <MaterialCommunityIcons
+              name={editingId ? "content-save-outline" : "plus"}
+              size={18}
+              color={colors.accentText}
+            />
+            <Text style={ui.primaryButtonText}>{busy ? "Сохранение…" : editingId ? "Сохранить" : "Добавить"}</Text>
+          </Pressable>
+          {editingId ? (
+            <Pressable style={ui.ghostButton} onPress={resetForm} disabled={busy}>
+              <Text style={ui.ghostButtonText}>Отмена</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+    </View>
+  );
+}
+
 const DOC_TYPES = [
   "Удостоверение НАКС",
   "Лицензия",
@@ -3069,6 +3878,7 @@ function ProfilePanel({
       services: ServiceKey[];
       radiusKm: number;
       available: boolean;
+      avatar: string;
     },
     onError?: (message: string) => void
   ) => void;
@@ -3086,6 +3896,7 @@ function ProfilePanel({
   const [cityId, setCityId] = useState(account.cityId);
   const [services, setServices] = useState<ServiceKey[]>(account.services ?? []);
   const [available, setAvailable] = useState(account.available ?? true);
+  const [avatar, setAvatar] = useState<string | null>(account.avatar || null);
   const [radiusInput, setRadiusInput] = useState(String(account.radiusKm ?? 0));
   const [cityPickerOpen, setCityPickerOpen] = useState(false);
   const [feeInput, setFeeInput] = useState(String(bidFee));
@@ -3099,6 +3910,17 @@ function ProfilePanel({
     setServices((current) =>
       current.includes(key) ? current.filter((k) => k !== key) : [...current, key]
     );
+  }
+
+  // Выбрать фото профиля (сохранится при нажатии «Сохранить»).
+  async function pickAvatar() {
+    const result = await pickImageAsBase64();
+    if (result.ok) {
+      setAvatar(result.dataUrl);
+      setSaveError("");
+    } else if (result.error) {
+      setSaveError(result.error);
+    }
   }
 
   // Услуги, сгруппированные по категориям (для выбора специализаций исполнителя).
@@ -3119,12 +3941,26 @@ function ProfilePanel({
     <View style={styles.profileWrap}>
       <View style={ui.card}>
         <View style={styles.rowCenter}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{account.name.slice(0, 1).toUpperCase()}</Text>
-          </View>
+          <Pressable onPress={pickAvatar}>
+            {avatar ? (
+              <Image source={{ uri: avatar }} style={styles.avatarImg} resizeMode="cover" />
+            ) : (
+              <View style={styles.avatar}>
+                <Text style={styles.avatarText}>{account.name.slice(0, 1).toUpperCase()}</Text>
+              </View>
+            )}
+            <View style={styles.avatarEditBadge}>
+              <MaterialCommunityIcons name="camera" size={12} color={colors.accentText} />
+            </View>
+          </Pressable>
           <View style={styles.flex}>
             <Text style={styles.panelTitle}>{account.name}</Text>
             <Text style={styles.panelSubtitle}>{account.email}</Text>
+            <Text style={styles.avatarHint}>Нажмите на фото, чтобы сменить{avatar ? " · " : ""}
+              {avatar ? (
+                <Text style={styles.avatarRemove} onPress={() => setAvatar(null)}>убрать</Text>
+              ) : null}
+            </Text>
           </View>
         </View>
         <View style={styles.ratingPill}>
@@ -3280,7 +4116,8 @@ function ProfilePanel({
                 telegram,
                 services,
                 radiusKm: Math.max(0, Math.round(Number(radiusInput) || 0)),
-                available
+                available,
+                avatar: avatar ?? ""
               },
               (message) => setSaveError(message)
             );
@@ -3322,6 +4159,8 @@ function ProfilePanel({
       {role === "driver" ? (
         <PortfolioEditor account={account} />
       ) : null}
+
+      {role === "driver" ? <EquipmentEditor account={account} catalog={catalog} /> : null}
 
       {role === "driver" ? (
         <WalletCard account={account} bidFee={bidFee} onBalanceChange={onBalanceChange} />
@@ -4256,6 +5095,7 @@ function AdminScreen({ catalog, onCatalogChanged }: { catalog: Catalog; onCatalo
   const [cityFilter, setCityFilter] = useState<string | null>(null);
   const [cityPickerOpen, setCityPickerOpen] = useState(false);
   const [zoomPhoto, setZoomPhoto] = useState<string | null>(null);
+  const [eqVerifs, setEqVerifs] = useState<EquipmentVerification[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -4263,7 +5103,20 @@ function AdminScreen({ catalog, onCatalogChanged }: { catalog: Catalog; onCatalo
     } catch {
       // нет прав / сеть
     }
+    try {
+      setEqVerifs(await fetchEquipmentVerifications());
+    } catch {
+      // нет прав / сеть
+    }
   }, []);
+
+  async function decideEq(id: string, approve: boolean) {
+    try {
+      setEqVerifs(await decideEquipmentVerification(id, approve));
+    } catch {
+      // тихо
+    }
+  }
 
   const loadAnalytics = useCallback(async () => {
     try {
@@ -4446,6 +5299,40 @@ function AdminScreen({ catalog, onCatalogChanged }: { catalog: Catalog; onCatalo
                     </Pressable>
                     <Pressable style={styles.acceptButton} onPress={() => decide(r.id, true)}>
                       <Text style={styles.acceptButtonText}>Одобрить</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </View>
+            );
+          })
+        )}
+      </View>
+
+      <View style={ui.card}>
+        <Text style={styles.panelTitle}>Техника на проверке (СТС)</Text>
+        {eqVerifs.length === 0 ? (
+          <Text style={styles.panelSubtitle}>Нет техники на проверке по СТС.</Text>
+        ) : (
+          eqVerifs.map((e) => {
+            const svc = serviceByKey(e.serviceKey);
+            return (
+              <View key={e.id} style={styles.verifAdminCard}>
+                <Pressable onPress={() => setZoomPhoto(e.stsPhoto)}>
+                  <Image source={{ uri: e.stsPhoto }} style={styles.verifThumb} resizeMode="cover" />
+                </Pressable>
+                <View style={styles.flex}>
+                  <Text style={styles.bidDriver}>{e.executorName}</Text>
+                  <Text style={styles.bidMeta}>
+                    {svc.title}
+                    {e.title ? ` · ${e.title}` : ""}
+                  </Text>
+                  <Text style={styles.bidMeta}>{summarizeSpecs(e.serviceKey, e.specs) || "без ТТХ"}</Text>
+                  <View style={styles.rowGap}>
+                    <Pressable style={styles.rejectButton} onPress={() => decideEq(e.id, false)}>
+                      <Text style={styles.rejectButtonText}>Отклонить</Text>
+                    </Pressable>
+                    <Pressable style={styles.acceptButton} onPress={() => decideEq(e.id, true)}>
+                      <Text style={styles.acceptButtonText}>Подтвердить</Text>
                     </Pressable>
                   </View>
                 </View>
@@ -4778,6 +5665,27 @@ function notifIcon(type: string): keyof typeof MaterialCommunityIcons.glyphMap {
       return "check-decagram-outline";
     case "review":
       return "star-outline";
+    case "quick":
+      return "clipboard-arrow-down-outline";
+    case "offer_interest":
+      return "eye-outline";
+    case "verify":
+      return "shield-check-outline";
+    case "cancelled":
+      return "cancel";
+    case "enroute":
+      return "truck-fast-outline";
+    case "refund":
+    case "topup":
+    case "balance":
+      return "wallet-outline";
+    case "referral":
+      return "gift-outline";
+    case "reminder":
+    case "schedule":
+      return "clock-outline";
+    case "complaint":
+      return "alert-octagon-outline";
     default:
       return "bell-outline";
   }
@@ -4976,6 +5884,35 @@ const styles = StyleSheet.create({
   },
   portfolioTitle: { color: colors.ink, fontSize: 14, fontWeight: "700" },
   portfolioLink: { color: colors.inkFaint, fontSize: 12, marginTop: 2 },
+  equipAction: { padding: 2 },
+  equipField: { gap: 6 },
+  equipButtons: { flexDirection: "row", gap: 8, alignItems: "center" },
+  equipIcon: { marginTop: 2 },
+  equipPublished: { color: colors.positive, fontSize: 12, fontWeight: "700", marginTop: 3 },
+  equipPublishRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 4 },
+  equipThumb: { width: 54, height: 54, borderRadius: radius - 6, backgroundColor: colors.surfaceMuted },
+  equipVerified: { color: colors.verified, fontSize: 12, fontWeight: "700", marginTop: 3 },
+  equipPending: { color: colors.inkSoft, fontSize: 12, fontWeight: "600", marginTop: 3 },
+  equipStsLink: { color: colors.accent, fontSize: 12, fontWeight: "700", marginTop: 3 },
+  offerPhoto: { width: "100%", height: 170, borderRadius: radius - 4, backgroundColor: colors.surfaceMuted, marginBottom: 10 },
+  offerVerifyBadge: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 6 },
+  offerVerifyText: { color: colors.verified, fontSize: 12, fontWeight: "700" },
+  offerPriceSoft: { color: colors.inkSoft, fontWeight: "700", fontSize: 13 },
+  offerRequestBtn: { marginTop: 12 },
+  offerContactRowGap: {},
+  offerComplain: { color: colors.inkFaint, fontSize: 12, marginTop: 10, textAlign: "center" },
+  offerStatusRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  offerStatusText: { color: colors.inkSoft, fontSize: 12, fontWeight: "600" },
+  reqMark: { color: colors.warning, fontSize: 11, fontWeight: "700" },
+  verifiedFilter: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8, alignSelf: "flex-start" },
+  offerHead: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  offerPrice: { color: colors.ink, fontWeight: "800" },
+  offerExecRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10 },
+  offerExecName: { color: colors.ink, fontSize: 13, fontWeight: "700", flexShrink: 1 },
+  offerRating: { color: colors.star, fontSize: 13, fontWeight: "700", marginLeft: "auto" },
+  offerNote: { color: colors.inkSoft, fontSize: 13, marginTop: 8 },
+  offerContactRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 12 },
   analyticsRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 5 },
   analyticsLabel: { color: colors.ink, fontSize: 13, fontWeight: "700", width: 96 },
   analyticsBar: {
@@ -5332,6 +6269,22 @@ const styles = StyleSheet.create({
   enrouteBanner: { backgroundColor: colors.warningBg },
   profileWrap: { gap: 16 },
   avatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.ink, alignItems: "center", justifyContent: "center" },
+  avatarImg: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.surfaceMuted },
+  avatarEditBadge: {
+    position: "absolute",
+    right: -2,
+    bottom: -2,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.ink,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: colors.surface
+  },
+  avatarHint: { color: colors.inkFaint, fontSize: 11, marginTop: 2 },
+  avatarRemove: { color: colors.warning, fontSize: 11, fontWeight: "700" },
   avatarText: { color: colors.accentText, fontSize: 20, fontWeight: "800" },
   ratingPill: { flexDirection: "row", alignItems: "center", gap: 6 },
   ratingText: { color: colors.ink, fontSize: 14, fontWeight: "700" },
