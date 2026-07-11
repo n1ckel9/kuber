@@ -60,6 +60,7 @@ export type Account = {
   balance?: number;
   radiusKm?: number;
   available?: boolean;
+  busy?: boolean;
   verified?: boolean;
   verifyStatus?: "none" | "pending" | "verified" | "rejected";
   isAdmin?: boolean;

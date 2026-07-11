@@ -55,6 +55,7 @@ function migrate() {
       balance       INTEGER NOT NULL DEFAULT 0,
       radius_km     INTEGER NOT NULL DEFAULT 0,
       available     INTEGER NOT NULL DEFAULT 1,
+      busy          INTEGER NOT NULL DEFAULT 0,
       verified      INTEGER NOT NULL DEFAULT 0,
       verify_status TEXT NOT NULL DEFAULT 'none',
       avatar        TEXT NOT NULL DEFAULT '',
@@ -338,6 +339,7 @@ function ensureColumns() {
   add("accounts", "balance", "balance INTEGER NOT NULL DEFAULT 0");
   add("accounts", "radius_km", "radius_km INTEGER NOT NULL DEFAULT 0");
   add("accounts", "available", "available INTEGER NOT NULL DEFAULT 1");
+  add("accounts", "busy", "busy INTEGER NOT NULL DEFAULT 0");
   add("accounts", "verified", "verified INTEGER NOT NULL DEFAULT 0");
   add("accounts", "verify_status", "verify_status TEXT NOT NULL DEFAULT 'none'");
   add("accounts", "bio", "bio TEXT NOT NULL DEFAULT ''");
@@ -734,6 +736,7 @@ function toPublicAccount(row) {
     balance: row.balance || 0,
     radiusKm: row.radius_km || 0,
     available: row.available !== 0,
+    busy: row.busy === 1,
     verified: row.verified === 1,
     verifyStatus: row.verify_status || "none",
     bio: row.bio || "",
@@ -803,7 +806,7 @@ function createAccount(account) {
 function updateProfile(accountId, fields) {
   const current = db.prepare("SELECT * FROM accounts WHERE id = ?").get(accountId);
   db.prepare(
-    "UPDATE accounts SET name = ?, role = ?, city_id = ?, phone = ?, telegram = ?, radius_km = ?, available = ?, avatar = ? WHERE id = ?"
+    "UPDATE accounts SET name = ?, role = ?, city_id = ?, phone = ?, telegram = ?, radius_km = ?, available = ?, busy = ?, avatar = ? WHERE id = ?"
   ).run(
     fields.name,
     fields.role,
@@ -812,6 +815,7 @@ function updateProfile(accountId, fields) {
     fields.telegram !== undefined ? fields.telegram : current.telegram,
     fields.radiusKm !== undefined ? Math.max(0, Math.round(fields.radiusKm)) : current.radius_km,
     fields.available !== undefined ? (fields.available ? 1 : 0) : current.available,
+    fields.busy !== undefined ? (fields.busy ? 1 : 0) : current.busy,
     fields.avatar !== undefined ? fields.avatar : current.avatar,
     accountId
   );
@@ -1402,7 +1406,7 @@ function listOffers({ cityId, service, verifiedOnly }) {
       `SELECT e.id, e.service_key, e.title, e.specs, e.price, e.note, e.photo, e.verify_status, e.created_at,
               a.id AS acc_id, a.name, a.phone, a.telegram, a.contact, a.verified, a.available,
               a.rating_sum, a.rating_count,
-              EXISTS (SELECT 1 FROM orders o WHERE o.executor_id = a.id AND o.status IN ('matched','enroute')) AS busy
+              (a.busy = 1 OR EXISTS (SELECT 1 FROM orders o WHERE o.executor_id = a.id AND o.status IN ('matched','enroute'))) AS busy
          FROM executor_equipment e
          JOIN accounts a ON a.id = e.account_id
         WHERE e.published = 1 AND a.role = 'driver' AND a.banned = 0

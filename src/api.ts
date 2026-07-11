@@ -126,6 +126,7 @@ export async function updateProfile(payload: {
   services?: ServiceKey[];
   radiusKm?: number;
   available?: boolean;
+  busy?: boolean;
   avatar?: string;
 }) {
   return request<Account>("/api/account", {

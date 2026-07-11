@@ -106,13 +106,20 @@ function normalizePhone(input) {
 }
 
 // Отправка push через Expo Push API (fire-and-forget). На web/без токенов — no-op.
-function sendPush(accountId, text) {
+function sendPush(accountId, text, orderId) {
   try {
     const tokens = repo.getPushTokens(accountId).filter((t) => t.startsWith("ExponentPushToken"));
     if (tokens.length === 0) {
       return;
     }
-    const messages = tokens.map((to) => ({ to, sound: "default", title: "Кубер", body: text }));
+    // data.orderId — чтобы тап по уведомлению открыл нужный заказ.
+    const messages = tokens.map((to) => ({
+      to,
+      sound: "default",
+      title: "Кубер",
+      body: text,
+      ...(orderId ? { data: { orderId } } : {})
+    }));
     void fetch("https://exp.host/--/api/v2/push/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -128,7 +135,7 @@ function notify(accountId, type, text, orderId) {
     return;
   }
   repo.addNotification({ id: makeId("n_"), accountId, type, text, orderId, createdAt: Date.now() });
-  sendPush(accountId, text);
+  sendPush(accountId, text, orderId);
 }
 
 function bearerToken(req) {
@@ -460,6 +467,7 @@ app.patch("/api/account", requireAuth, (req, res) => {
     : undefined;
   const radiusKm = body.radiusKm !== undefined ? Number(body.radiusKm) : undefined;
   const available = body.available !== undefined ? Boolean(body.available) : undefined;
+  const busy = body.busy !== undefined ? Boolean(body.busy) : undefined;
   // Аватар: base64 data-URL (валидируем размер) либо пустая строка (сбросить). undefined — не менять.
   let avatar;
   if (body.avatar !== undefined) {
@@ -479,6 +487,7 @@ app.patch("/api/account", requireAuth, (req, res) => {
       services,
       radiusKm,
       available,
+      busy,
       avatar
     })
   );

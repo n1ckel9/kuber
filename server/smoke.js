@@ -221,6 +221,10 @@ async function waitForServer() {
     await req("PATCH", "/api/account", { available: false }, td);
     check("витрина: занятость отражает «не на линии»", (await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body.find((o) => o.id === eq2)?.executor.available === false);
     await req("PATCH", "/api/account", { available: true }, td);
+    await req("PATCH", "/api/account", { busy: true }, td);
+    check("витрина: ручной «занят» отражается", (await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body.find((o) => o.id === eq2)?.executor.busy === true);
+    await req("PATCH", "/api/account", { busy: false }, td);
+    check("витрина: снятие «занят»", (await req("GET", "/api/offers?cityId=yakutsk", null, tc)).body.find((o) => o.id === eq2)?.executor.busy === false);
     const contactRes = await req("POST", `/api/offers/${eq2}/contact`, { channel: "telegram" }, tc);
     check("витрина: контакт раскрыт по тапу", contactRes.body?.telegram === "drv_tg");
     const reqRes = await req("POST", `/api/offers/${eq2}/request`, { cityId: "yakutsk", from: "Ленина 1", details: "нужен манипулятор", price: 5000 }, tc);

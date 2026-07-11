@@ -23,7 +23,6 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
   acceptBid as acceptBidOnServer,
-  apiBaseUrl,
   ApiError,
   confirmOrder as confirmOrderOnServer,
   createBid,
@@ -111,7 +110,7 @@ import { AuthScreen } from "./src/AuthScreen";
 import { fallbackCatalog, serviceByKey, setServiceRegistry } from "./src/catalog";
 import { formatKm, getCurrentPosition, haversineKm } from "./src/geo";
 import { MapView } from "./src/MapView";
-import { getPushToken } from "./src/push";
+import { getPushToken, onNotificationTap } from "./src/push";
 import { clearToken, loadToken, saveToken } from "./src/storage";
 import { colors, radius, ui } from "./src/theme";
 import {
@@ -386,6 +385,21 @@ export default function App() {
       }
     });
   }, [account]);
+
+  // Тап по push-уведомлению → открываем нужный заказ.
+  useEffect(() => {
+    if (!account) {
+      return;
+    }
+    let unsub = () => {};
+    void onNotificationTap((orderId) => {
+      setViewMode(role === "driver" ? "jobs" : "orders");
+      setDetailId(orderId);
+    }).then((fn) => {
+      unsub = fn;
+    });
+    return () => unsub();
+  }, [account, role]);
 
   // Избранные исполнители (для заказчика).
   useEffect(() => {
@@ -953,6 +967,7 @@ export default function App() {
       services: ServiceKey[];
       radiusKm: number;
       available: boolean;
+      busy: boolean;
       avatar: string;
     },
     onError?: (message: string) => void
@@ -1001,9 +1016,8 @@ export default function App() {
           { id: "account", label: "Профиль" }
         ]
       : [
-          { id: "orders", label: "Заявки" },
-          { id: "market", label: "Витрина" },
-          { id: "map", label: "Карта" },
+          { id: "orders", label: "Заказать" },
+          { id: "market", label: "Техника" },
           { id: "account", label: "Профиль" }
         ];
   if (account.isAdmin) {
@@ -1589,6 +1603,7 @@ function CreateOrderPanel({
   const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [repeatDays, setRepeatDays] = useState(0);
+  const [repeatOn, setRepeatOn] = useState(false);
   const [priceHint, setPriceHint] = useState<{ count: number; min?: number; max?: number } | null>(null);
   const skipNextRef = useRef(false);
 
@@ -1819,24 +1834,35 @@ function CreateOrderPanel({
       </View>
 
       <View style={ui.inputGroup}>
-        <Text style={ui.label}>Регулярность</Text>
-        <View style={styles.pillWrap}>
-          {repeatOptions.map((opt) => (
-            <Pressable
-              key={opt.days}
-              onPress={() => setRepeatDays(opt.days)}
-              style={[ui.pill, repeatDays === opt.days && ui.pillActive]}
-            >
-              <Text style={[ui.pillText, repeatDays === opt.days && ui.pillTextActive]}>
-                {opt.label}
-              </Text>
-            </Pressable>
-          ))}
+        <View style={styles.rowBetween}>
+          <Text style={ui.label}>Повторять регулярно</Text>
+          <Switch
+            value={repeatOn}
+            onValueChange={(v) => {
+              setRepeatOn(v);
+              setRepeatDays(v ? repeatDays || 7 : 0);
+            }}
+            trackColor={{ true: colors.ink, false: colors.line }}
+            thumbColor={colors.surface}
+          />
         </View>
-        {repeatDays > 0 ? (
-          <Text style={styles.locationNote}>
-            Заявка будет повторяться автоматически. Управлять — в профиле.
-          </Text>
+        {repeatOn ? (
+          <>
+            <View style={styles.pillWrap}>
+              {repeatOptions
+                .filter((opt) => opt.days > 0)
+                .map((opt) => (
+                  <Pressable
+                    key={opt.days}
+                    onPress={() => setRepeatDays(opt.days)}
+                    style={[ui.pill, repeatDays === opt.days && ui.pillActive]}
+                  >
+                    <Text style={[ui.pillText, repeatDays === opt.days && ui.pillTextActive]}>{opt.label}</Text>
+                  </Pressable>
+                ))}
+            </View>
+            <Text style={styles.locationNote}>Заявка будет повторяться автоматически. Управлять — в профиле.</Text>
+          </>
         ) : null}
       </View>
 
@@ -1848,6 +1874,7 @@ function CreateOrderPanel({
           // одноразовый заказ втихую заведёт вторую подписку.
           if (ok) {
             setRepeatDays(0);
+            setRepeatOn(false);
           }
         }}
       >
@@ -2528,6 +2555,27 @@ function OrderDetails({
               ? ` · ≈ ${formatKm(haversineKm([order.execPos.lng, order.execPos.lat], order.coordinates))} до вас`
               : ""}
           </Text>
+        </View>
+      ) : null}
+
+      {/* Живая карта: где сейчас исполнитель и куда едет (заказчику, пока в пути) */}
+      {role === "client" && order.status === "enroute" ? (
+        <View style={styles.enrouteMap}>
+          <MapView
+            city={{
+              id: order.cityId,
+              regionId: "",
+              name: "",
+              region: "",
+              center: order.execPos ? [order.execPos.lng, order.execPos.lat] : order.coordinates,
+              zoom: 14,
+              services: []
+            }}
+            orders={[order]}
+          />
+          {!order.execPos ? (
+            <Text style={styles.enrouteMapHint}>Ждём координаты исполнителя…</Text>
+          ) : null}
         </View>
       ) : null}
 
@@ -3878,6 +3926,7 @@ function ProfilePanel({
       services: ServiceKey[];
       radiusKm: number;
       available: boolean;
+      busy: boolean;
       avatar: string;
     },
     onError?: (message: string) => void
@@ -3896,7 +3945,11 @@ function ProfilePanel({
   const [cityId, setCityId] = useState(account.cityId);
   const [services, setServices] = useState<ServiceKey[]>(account.services ?? []);
   const [available, setAvailable] = useState(account.available ?? true);
+  const [busy, setBusy] = useState(account.busy ?? false);
   const [avatar, setAvatar] = useState<string | null>(account.avatar || null);
+  // Служебная карточка (переключение роли, тариф) скрыта от обычных юзеров —
+  // раскрывается долгим нажатием на аватар.
+  const [showDev, setShowDev] = useState(devMode);
   const [radiusInput, setRadiusInput] = useState(String(account.radiusKm ?? 0));
   const [cityPickerOpen, setCityPickerOpen] = useState(false);
   const [feeInput, setFeeInput] = useState(String(bidFee));
@@ -3941,7 +3994,7 @@ function ProfilePanel({
     <View style={styles.profileWrap}>
       <View style={ui.card}>
         <View style={styles.rowCenter}>
-          <Pressable onPress={pickAvatar}>
+          <Pressable onPress={pickAvatar} onLongPress={() => setShowDev(true)} delayLongPress={600}>
             {avatar ? (
               <Image source={{ uri: avatar }} style={styles.avatarImg} resizeMode="cover" />
             ) : (
@@ -3969,16 +4022,12 @@ function ProfilePanel({
             {rating > 0 ? `${rating.toFixed(1)} · ${account.ratingCount} ${plural(account.ratingCount ?? 0, "отзыв", "отзыва", "отзывов")}` : "пока нет отзывов"}
           </Text>
         </View>
-        <View style={[styles.syncBar, serverState === "offline" && styles.syncOffline]}>
-          <MaterialCommunityIcons
-            name={serverState === "sync" ? "cloud-check-outline" : "cloud-off-outline"}
-            size={16}
-            color={serverState === "sync" ? colors.positive : colors.warning}
-          />
-          <Text style={styles.syncText}>
-            {serverState === "sync" ? `На связи · ${apiBaseUrl}` : "Сервер недоступен"}
-          </Text>
-        </View>
+        {serverState === "offline" ? (
+          <View style={[styles.syncBar, styles.syncOffline]}>
+            <MaterialCommunityIcons name="cloud-off-outline" size={16} color={colors.warning} />
+            <Text style={styles.syncText}>Нет связи с сервером — проверьте интернет</Text>
+          </View>
+        ) : null}
       </View>
 
       <View style={ui.card}>
@@ -4086,6 +4135,21 @@ function ProfilePanel({
                 thumbColor={colors.surface}
               />
             </View>
+            <View style={styles.rowBetween}>
+              <View style={styles.flexShrink}>
+                <Text style={ui.label}>Сейчас занят</Text>
+                <Text style={styles.panelSubtitle}>
+                  В витрине пометим «занят» и опустим ниже, но объявление останется видно.
+                </Text>
+              </View>
+              <Switch
+                value={busy}
+                onValueChange={setBusy}
+                disabled={!available}
+                trackColor={{ true: colors.star, false: colors.line }}
+                thumbColor={colors.surface}
+              />
+            </View>
             <View style={ui.inputGroup}>
               <Text style={ui.label}>Рабочий радиус, км (0 — без ограничения)</Text>
               <TextInput
@@ -4117,6 +4181,7 @@ function ProfilePanel({
                 services,
                 radiusKm: Math.max(0, Math.round(Number(radiusInput) || 0)),
                 available,
+                busy,
                 avatar: avatar ?? ""
               },
               (message) => setSaveError(message)
@@ -4168,6 +4233,7 @@ function ProfilePanel({
 
       {role === "client" ? <SchedulesCard /> : null}
 
+      {showDev ? (
       <View style={ui.card}>
         <View style={styles.rowBetween}>
           <View style={styles.flexShrink}>
@@ -4227,6 +4293,7 @@ function ProfilePanel({
           </View>
         ) : null}
       </View>
+      ) : null}
 
       <ProfileExtras />
 
@@ -6267,6 +6334,8 @@ const styles = StyleSheet.create({
   },
   doneText: { color: colors.positive, fontSize: 14, fontWeight: "700", flex: 1 },
   enrouteBanner: { backgroundColor: colors.warningBg },
+  enrouteMap: { height: 220, borderRadius: radius - 4, overflow: "hidden", marginTop: 4 },
+  enrouteMapHint: { position: "absolute", bottom: 8, left: 8, backgroundColor: colors.surface, color: colors.inkSoft, fontSize: 12, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
   profileWrap: { gap: 16 },
   avatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.ink, alignItems: "center", justifyContent: "center" },
   avatarImg: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.surfaceMuted },

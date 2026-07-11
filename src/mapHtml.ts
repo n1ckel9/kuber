@@ -27,6 +27,11 @@ export function buildMapHtml({
     color: serviceByKey(order.service).accent
   }));
 
+  // Живые позиции исполнителей «в пути» (грузовик + пунктир до точки заявки).
+  const execMarkers = orders
+    .filter((o) => o.execPos && typeof o.execPos.lng === "number" && typeof o.execPos.lat === "number")
+    .map((o) => ({ from: [o.execPos!.lng, o.execPos!.lat], to: o.coordinates }));
+
   const sendBody =
     target === "rn"
       ? "window.ReactNativeWebView && window.ReactNativeWebView.postMessage(id);"
@@ -60,6 +65,7 @@ export function buildMapHtml({
   </div>
   <script>
     var orders = ${JSON.stringify(mapOrders)};
+    var execs = ${JSON.stringify(execMarkers)};
     var center = ${JSON.stringify(city.center)};
     var zoom = ${city.zoom};
     var pickable = ${pickable ? "true" : "false"};
@@ -91,6 +97,25 @@ export function buildMapHtml({
           m.bindTooltip(order.label, { permanent: true, direction: 'top', offset: [0, -8], className: 'vz-label' });
           m.on('click', function () { send(order.id); });
         });
+
+        // Исполнители «в пути»: пунктир до точки + маркер-грузовик, авто-масштаб под них.
+        var fitPts = [];
+        execs.forEach(function (ex) {
+          L.polyline([[ex.from[1], ex.from[0]], [ex.to[1], ex.to[0]]], {
+            color: '#1A1A1A', weight: 2, opacity: 0.55, dashArray: '6 8'
+          }).addTo(map);
+          var icon = L.divIcon({
+            html: '<div style="font-size:24px;line-height:24px;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))">🚚</div>',
+            className: 'vz-exec', iconSize: [26, 26], iconAnchor: [13, 13]
+          });
+          L.marker([ex.from[1], ex.from[0]], { icon: icon, zIndexOffset: 1000 }).addTo(map)
+            .bindTooltip('Исполнитель в пути', { direction: 'top', offset: [0, -12], className: 'vz-label' });
+          fitPts.push([ex.from[1], ex.from[0]]);
+          fitPts.push([ex.to[1], ex.to[0]]);
+        });
+        if (fitPts.length) {
+          map.fitBounds(fitPts, { padding: [40, 40], maxZoom: 15 });
+        }
 
         if (pickable) {
           var pinStyle = { radius: 10, color: '#ffffff', weight: 3, fillColor: '#1A1A1A', fillOpacity: 1 };
