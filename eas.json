@@ -13,7 +13,7 @@
         "simulator": false
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://kuber-api-nod2.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://201.24.60.141.nip.io"
       }
     },
     "ios-simulator": {
@@ -22,7 +22,7 @@
         "simulator": true
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://kuber-api-nod2.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://201.24.60.141.nip.io"
       }
     },
     "development": {
@@ -31,7 +31,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://kuber-api-nod2.onrender.com"
+        "EXPO_PUBLIC_API_URL": "https://201.24.60.141.nip.io"
       }
     },
     "production": {
