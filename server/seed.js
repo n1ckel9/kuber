@@ -36,40 +36,53 @@ const cities = [
 ];
 
 // Категории группируют услуги в интерфейсе (вкладки при выборе, разделы в профиле).
-// Ключи категорий должны совпадать с полем category у услуг ниже.
+// Три мегакатегории: Техника (с ТТХ, в витрине), Специалисты (работа руками) и
+// Интеллектуальные услуги. Ключи категорий совпадают с полем category у услуг ниже.
 const categories = [
-  { key: "equipment", title: "Спецтехника", sort: 1 },
-  { key: "transport", title: "Перевозки и вывоз", sort: 2 },
-  { key: "utilities", title: "Вода и коммунальные", sort: 3 },
-  { key: "electric", title: "Мастера", sort: 4 }
+  { key: "tech", title: "Техника", sort: 1 },
+  { key: "specialists", title: "Специалисты", sort: 2 },
+  { key: "intellectual", title: "Интеллектуальные", sort: 3 }
 ];
 
 const services = [
-  // Доставка и вывоз
-  { key: "dump", title: "Самосвал", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "transport", sort: 2 },
-  { key: "transport", title: "Перевозки", subtitle: "Грузовики, фургоны", icon: "truck", accent: "#556B8C", category: "transport", sort: 3 },
-  { key: "evac", title: "Эвакуатор", subtitle: "Эвакуация авто", icon: "tow-truck", accent: "#B23B3B", category: "transport", sort: 5 },
-  { key: "snow", title: "Снегоуборка", subtitle: "Уборка и вывоз снега", icon: "snowflake", accent: "#3E7CB1", category: "transport", sort: 6 },
-  { key: "trailer", title: "Трал / негабарит", subtitle: "Перевозка техники", icon: "truck-trailer", accent: "#4A5D6E", category: "transport", sort: 7 },
-  // Спецтехника
-  { key: "crane", title: "Манипулятор", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "equipment", sort: 10 },
-  { key: "autocrane", title: "Автокран", subtitle: "Подъём грузов", icon: "crane", accent: "#8A5CD1", category: "equipment", sort: 11 },
-  { key: "autotower", title: "Автовышка", subtitle: "Работы на высоте", icon: "ladder", accent: "#C98A2E", category: "equipment", sort: 12 },
-  { key: "excavator", title: "Экскаватор", subtitle: "Копка, траншеи", icon: "excavator", accent: "#B8942E", category: "equipment", sort: 13 },
-  { key: "loader_front", title: "Погрузчик", subtitle: "Фронтальный, вилочный", icon: "forklift", accent: "#6E7C45", category: "equipment", sort: 14 },
-  { key: "tractor", title: "Трактор / бульдозер", subtitle: "Трактор, бульдозер, грейдер", icon: "tractor", accent: "#A8862E", category: "equipment", sort: 15 },
-  { key: "concrete", title: "Бетон", subtitle: "Насос, миксер", icon: "cube-outline", accent: "#7A7A7A", category: "equipment", sort: 16 },
-  { key: "auger", title: "Ямобур", subtitle: "Столбы, сваи", icon: "screw-machine", accent: "#8C6D3A", category: "equipment", sort: 17 },
-  // Вода и коммунальные
-  { key: "water", title: "Водовоз", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "utilities", sort: 19 },
-  { key: "septic", title: "Ассенизатор", subtitle: "Септик, выгребная яма", icon: "truck-cargo-container", accent: "#6E7C45", category: "utilities", sort: 20 },
-  { key: "drilling", title: "Бурение скважин", subtitle: "Скважины на воду", icon: "water-pump", accent: "#1B6E8C", category: "utilities", sort: 22 },
-  // Мастера (работа руками)
-  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "electric", sort: 28 },
-  { key: "plumber", title: "Сантехник", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "electric", sort: 29 },
-  { key: "electrician", title: "Электрик", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "electric", sort: 30 },
-  { key: "welder", title: "Сварщик", subtitle: "Металлоконструкции", icon: "fire", accent: "#C7503A", category: "electric", sort: 31 },
-  { key: "lowvoltage", title: "Слаботочник", subtitle: "Сети, видеонаблюдение", icon: "ethernet-cable", accent: "#0E8A9C", category: "electric", sort: 32 }
+  // ── Техника (публикуется в витрине, с ТТХ) ───────────────────────────────
+  { key: "crane", title: "Манипуляторы", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "tech", sort: 1 },
+  { key: "autocrane", title: "Автокраны", subtitle: "Подъём грузов", icon: "crane", accent: "#8A5CD1", category: "tech", sort: 2 },
+  { key: "septic", title: "Ассенизаторы", subtitle: "Откачка септиков и ям", icon: "truck-cargo-container", accent: "#6E7C45", category: "tech", sort: 3 },
+  { key: "transport", title: "Грузовая техника", subtitle: "Бортовые, фургоны", icon: "truck", accent: "#556B8C", category: "tech", sort: 4 },
+  { key: "dump", title: "Самосвалы", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "tech", sort: 5 },
+  { key: "loader_front", title: "Погрузчики", subtitle: "Фронтальные, вилочные", icon: "forklift", accent: "#6E7C45", category: "tech", sort: 6 },
+  { key: "excavator", title: "Экскаваторы", subtitle: "Копка, траншеи", icon: "excavator", accent: "#B8942E", category: "tech", sort: 7 },
+  { key: "tractor", title: "Дорожная техника", subtitle: "Грейдер, каток, бульдозер", icon: "bulldozer", accent: "#A8862E", category: "tech", sort: 8 },
+  { key: "water", title: "Водовозки", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "tech", sort: 9 },
+  { key: "bus", title: "Автобусы, микроавтобусы", subtitle: "Пассажирские перевозки", icon: "bus", accent: "#3E7CB1", category: "tech", sort: 10 },
+  { key: "auger", title: "Буровые установки, ямобуры", subtitle: "Столбы, сваи, скважины", icon: "screw-machine", accent: "#8C6D3A", category: "tech", sort: 11 },
+  { key: "autotower", title: "Автоподъёмники", subtitle: "Работы на высоте", icon: "ladder", accent: "#C98A2E", category: "tech", sort: 12 },
+  // ── Специалисты (работа руками) ──────────────────────────────────────────
+  { key: "electrician", title: "Электрики", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "specialists", sort: 20 },
+  { key: "lowvoltage", title: "Слаботочники, КИПовцы", subtitle: "Сети, видеонаблюдение, КИПиА", icon: "ethernet-cable", accent: "#0E8A9C", category: "specialists", sort: 21 },
+  { key: "welder", title: "Сварщики", subtitle: "Металлоконструкции, НАКС", icon: "fire", accent: "#C7503A", category: "specialists", sort: 22 },
+  { key: "plumber", title: "Сантехники", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "specialists", sort: 23 },
+  { key: "carpenter", title: "Плотники", subtitle: "Дерево, каркасы, отделка", icon: "hammer", accent: "#8C6D3A", category: "specialists", sort: 24 },
+  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "specialists", sort: 25 },
+  { key: "cleaning", title: "Уборка помещений", subtitle: "Клининг, генеральная", icon: "broom", accent: "#2E7D5B", category: "specialists", sort: 26 },
+  { key: "operators", title: "Водители, операторы", subtitle: "Трактористы, машинисты", icon: "steering", accent: "#556B8C", category: "specialists", sort: 27 },
+  { key: "autorepair", title: "Ремонт автотехники", subtitle: "Диагностика, ремонт", icon: "car-wrench", accent: "#B23B3B", category: "specialists", sort: 28 },
+  { key: "tailor", title: "Пошив одежды и обуви", subtitle: "Ателье, ремонт", icon: "needle", accent: "#A85C8A", category: "specialists", sort: 29 },
+  { key: "renovation", title: "Ремонт помещений", subtitle: "Жилые и нежилые", icon: "format-paint", accent: "#C98A2E", category: "specialists", sort: 30 },
+  { key: "install", title: "Установка техники", subtitle: "Монтаж и подключение", icon: "tools", accent: "#556B8C", category: "specialists", sort: 31 },
+  { key: "furniture", title: "Ремонт, сборка мебели", subtitle: "Сборка, реставрация", icon: "sofa", accent: "#8C6D3A", category: "specialists", sort: 32 },
+  // ── Интеллектуальные услуги (по заявке) ──────────────────────────────────
+  { key: "lawyer", title: "Юристы", subtitle: "Консультации, документы", icon: "scale-balance", accent: "#4A5D6E", category: "intellectual", sort: 40 },
+  { key: "finance", title: "Финансы и бухгалтерия", subtitle: "Учёт, отчётность", icon: "calculator", accent: "#2E7D5B", category: "intellectual", sort: 41 },
+  { key: "academic", title: "Рефераты, курсовые, дипломные", subtitle: "Учебные работы", icon: "school", accent: "#7354A8", category: "intellectual", sort: 42 },
+  { key: "computer_repair", title: "Ремонт компьютерной техники", subtitle: "ПК, ноутбуки, ПО", icon: "laptop", accent: "#0E8A9C", category: "intellectual", sort: 43 },
+  { key: "appliance_repair", title: "Ремонт бытовой техники", subtitle: "Стиральные, холодильники", icon: "washing-machine", accent: "#1683A7", category: "intellectual", sort: 44 },
+  { key: "webdev", title: "Создание сайтов и приложений", subtitle: "Веб, мобильные, боты", icon: "code-tags", accent: "#8A5CD1", category: "intellectual", sort: 45 },
+  { key: "photo", title: "Фото и видеосъёмка", subtitle: "Съёмка, монтаж", icon: "camera", accent: "#A85C8A", category: "intellectual", sort: 46 },
+  { key: "print", title: "Распечатка и полиграфия", subtitle: "Печать, баннеры, визитки", icon: "printer", accent: "#C1642E", category: "intellectual", sort: 47 },
+  { key: "docs_ppr", title: "Исполнительная документация, ППР", subtitle: "ИД, ППР, проекты", icon: "file-document-outline", accent: "#4A5D6E", category: "intellectual", sort: 48 },
+  { key: "estimate", title: "Составление сметы, КС-2", subtitle: "Сметы, КС-2, КС-3", icon: "file-table", accent: "#556B8C", category: "intellectual", sort: 49 }
 ];
 
 // Какие услуги доступны в каждом городе. Якутск — полный набор,

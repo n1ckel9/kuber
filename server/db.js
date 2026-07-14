@@ -495,6 +495,16 @@ function syncServices() {
         addCityService.run(cityId, key);
       }
     }
+    // Прунинг: услуги, удалённые из seed (напр. при реструктуризации каталога),
+    // иначе они «висят» в БД с уже несуществующей категорией и ломают группировку.
+    // Исторические заказы не трогаем — клиент терпит неизвестный ключ (fallback).
+    const seedKeys = seed.services.map((s) => s.key);
+    const placeholders = seedKeys.map(() => "?").join(",");
+    if (seedKeys.length) {
+      db.prepare(`DELETE FROM city_services WHERE service_key NOT IN (${placeholders})`).run(...seedKeys);
+      db.prepare(`DELETE FROM account_services WHERE service_key NOT IN (${placeholders})`).run(...seedKeys);
+      db.prepare(`DELETE FROM services WHERE key NOT IN (${placeholders})`).run(...seedKeys);
+    }
   });
   tx();
 }

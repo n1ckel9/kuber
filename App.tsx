@@ -1017,7 +1017,7 @@ export default function App() {
         ]
       : [
           { id: "orders", label: "Заказать" },
-          { id: "market", label: "Техника" },
+          { id: "market", label: "Витрина" },
           { id: "account", label: "Профиль" }
         ];
   if (account.isAdmin) {
@@ -3127,7 +3127,7 @@ function MarketScreen({ cityId, cityName, catalog }: { cityId: string; cityName:
   return (
     <>
       <View style={ui.card}>
-        <Text style={styles.panelTitle}>Техника в наличии</Text>
+        <Text style={styles.panelTitle}>Витрина исполнителей</Text>
         <Text style={styles.panelSubtitle}>
           Предложения исполнителей{cityName ? ` в городе ${cityName}` : ""}. Запросите технику или свяжитесь напрямую.
         </Text>
@@ -3653,7 +3653,7 @@ function EquipmentEditor({ account, catalog }: { account: Account; catalog: Cata
 
         <View style={styles.equipPublishRow}>
           <View style={styles.flex}>
-            <Text style={ui.label}>Разместить в витрине «Техника в наличии»</Text>
+            <Text style={ui.label}>Разместить в витрине исполнителей</Text>
             <Text style={styles.panelSubtitle}>Заказчики увидят предложение и свяжутся напрямую.</Text>
           </View>
           <Switch

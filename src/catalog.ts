@@ -3,25 +3,29 @@ import { Catalog, Category, City, Order, Region, Service, ServiceKey } from "./t
 // Услуги по умолчанию. Используются как запасной вариант (offline) и как
 // исходный реестр для отрисовки иконок/цветов до загрузки справочника с сервера.
 // Должны совпадать с server/seed.js.
+// Представительный набор (не все 35 услуг) — только для offline/первой отрисовки,
+// полный справочник приходит с сервера и заменяет реестр. Ключи и категории
+// должны совпадать с server/seed.js.
 const defaultServices: Service[] = [
-  { key: "water", title: "Водовоз", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "transport" },
-  { key: "dump", title: "КамАЗ", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "transport" },
-  { key: "transport", title: "Перевозки", subtitle: "Грузовики, фургоны", icon: "truck", accent: "#556B8C", category: "transport" },
-  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "transport" },
-  { key: "crane", title: "Манипулятор", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "equipment" },
-  { key: "tractor", title: "Спецтехника", subtitle: "Трактор, экскаватор", icon: "excavator", accent: "#B8942E", category: "equipment" },
-  { key: "septic", title: "Ассенизатор", subtitle: "Септик, выгребная яма", icon: "truck-cargo-container", accent: "#6E7C45", category: "utilities" },
-  { key: "plumber", title: "Сантехник", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "utilities" },
-  { key: "electrician", title: "Электрик", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "electric" },
-  { key: "welder", title: "Сварщик", subtitle: "Металлоконструкции", icon: "fire", accent: "#C7503A", category: "electric" },
-  { key: "lowvoltage", title: "Слаботочник", subtitle: "Сети, видеонаблюдение", icon: "ethernet-cable", accent: "#0E8A9C", category: "electric" }
+  { key: "crane", title: "Манипуляторы", subtitle: "Погрузка и доставка", icon: "crane", accent: "#7354A8", category: "tech" },
+  { key: "dump", title: "Самосвалы", subtitle: "Песок, щебень, вывоз", icon: "dump-truck", accent: "#C1642E", category: "tech" },
+  { key: "excavator", title: "Экскаваторы", subtitle: "Копка, траншеи", icon: "excavator", accent: "#B8942E", category: "tech" },
+  { key: "water", title: "Водовозки", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "tech" },
+  { key: "septic", title: "Ассенизаторы", subtitle: "Откачка септиков и ям", icon: "truck-cargo-container", accent: "#6E7C45", category: "tech" },
+  { key: "electrician", title: "Электрики", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "specialists" },
+  { key: "plumber", title: "Сантехники", subtitle: "Монтаж и ремонт", icon: "pipe-wrench", accent: "#2E7D5B", category: "specialists" },
+  { key: "welder", title: "Сварщики", subtitle: "Металлоконструкции, НАКС", icon: "fire", accent: "#C7503A", category: "specialists" },
+  { key: "loader", title: "Грузчики", subtitle: "Погрузка и выгрузка", icon: "dolly", accent: "#84763A", category: "specialists" },
+  { key: "cleaning", title: "Уборка помещений", subtitle: "Клининг, генеральная", icon: "broom", accent: "#2E7D5B", category: "specialists" },
+  { key: "lawyer", title: "Юристы", subtitle: "Консультации, документы", icon: "scale-balance", accent: "#4A5D6E", category: "intellectual" },
+  { key: "finance", title: "Финансы и бухгалтерия", subtitle: "Учёт, отчётность", icon: "calculator", accent: "#2E7D5B", category: "intellectual" },
+  { key: "webdev", title: "Создание сайтов и приложений", subtitle: "Веб, мобильные, боты", icon: "code-tags", accent: "#8A5CD1", category: "intellectual" }
 ];
 
 const defaultCategories: Category[] = [
-  { key: "transport", title: "Доставка и вывоз" },
-  { key: "equipment", title: "Спецтехника" },
-  { key: "utilities", title: "Сантехника и вода" },
-  { key: "electric", title: "Электрика и монтаж" }
+  { key: "tech", title: "Техника" },
+  { key: "specialists", title: "Специалисты" },
+  { key: "intellectual", title: "Интеллектуальные" }
 ];
 
 const allServiceKeys = defaultServices.map((s) => s.key);
@@ -52,7 +56,7 @@ const fallbackCities: City[] = [
     region: "Новосибирская область",
     center: [82.92043, 55.030204],
     zoom: 11,
-    services: ["water", "septic", "dump", "tractor", "transport", "electrician", "plumber"]
+    services: ["water", "septic", "dump", "excavator", "crane", "electrician", "plumber"]
   }
 ];
 
