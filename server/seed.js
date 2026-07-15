@@ -56,7 +56,7 @@ const services = [
   { key: "tractor", title: "Дорожная техника", subtitle: "Грейдер, каток, бульдозер", icon: "bulldozer", accent: "#A8862E", category: "tech", sort: 8 },
   { key: "water", title: "Водовозки", subtitle: "Питьевая и тех. вода", icon: "tanker-truck", accent: "#1683A7", category: "tech", sort: 9 },
   { key: "bus", title: "Автобусы, микроавтобусы", subtitle: "Пассажирские перевозки", icon: "bus", accent: "#3E7CB1", category: "tech", sort: 10 },
-  { key: "auger", title: "Буровые установки, ямобуры", subtitle: "Столбы, сваи, скважины", icon: "screw-machine", accent: "#8C6D3A", category: "tech", sort: 11 },
+  { key: "auger", title: "Буровые установки, ямобуры", subtitle: "Столбы, сваи, скважины", icon: "water-well", accent: "#8C6D3A", category: "tech", sort: 11 },
   { key: "autotower", title: "Автоподъёмники", subtitle: "Работы на высоте", icon: "ladder", accent: "#C98A2E", category: "tech", sort: 12 },
   // ── Специалисты (работа руками) ──────────────────────────────────────────
   { key: "electrician", title: "Электрики", subtitle: "Монтаж и ремонт сети", icon: "flash", accent: "#D98A00", category: "specialists", sort: 20 },

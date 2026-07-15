@@ -1602,6 +1602,7 @@ function CreateOrderPanel({
 }) {
   const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
+  const [catOpen, setCatOpen] = useState(false);
   const [repeatDays, setRepeatDays] = useState(0);
   const [repeatOn, setRepeatOn] = useState(false);
   const [priceHint, setPriceHint] = useState<{ count: number; min?: number; max?: number } | null>(null);
@@ -1644,6 +1645,7 @@ function CreateOrderPanel({
   const showTabs = catList.length > 1;
   // Если активная категория отсутствует в этом городе — берём первую доступную.
   const effectiveCat = catList.some((c) => c.key === activeCat) ? activeCat : catList[0]?.key ?? "other";
+  const effectiveCatTitle = catList.find((c) => c.key === effectiveCat)?.title ?? "Категория";
   const visibleServices = showTabs
     ? services.filter((s) => (s.category || "other") === effectiveCat)
     : services;
@@ -1696,39 +1698,77 @@ function CreateOrderPanel({
       </View>
 
       {showTabs ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.categoryRow}
-        >
-          {catList.map((cat) => {
-            const active = cat.key === effectiveCat;
-            return (
-              <Pressable
-                key={cat.key}
-                onPress={() => setActiveCat(cat.key)}
-                style={[styles.categoryTab, active && styles.categoryTabActive]}
-              >
-                <Text style={[styles.categoryTabText, active && styles.categoryTabTextActive]}>
-                  {cat.title}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
+        <View>
+          <Text style={ui.label}>Категория</Text>
+          <Pressable style={styles.megaSelect} onPress={() => setCatOpen((v) => !v)}>
+            <Text style={styles.megaSelectText}>{effectiveCatTitle}</Text>
+            <MaterialCommunityIcons
+              name={catOpen ? "chevron-up" : "chevron-down"}
+              size={22}
+              color={colors.inkSoft}
+            />
+          </Pressable>
+          {catOpen ? (
+            <View style={styles.megaMenu}>
+              {catList.map((cat, index) => {
+                const active = cat.key === effectiveCat;
+                return (
+                  <Pressable
+                    key={cat.key}
+                    onPress={() => {
+                      setActiveCat(cat.key);
+                      setCatOpen(false);
+                    }}
+                    style={[styles.megaOption, index > 0 && styles.megaOptionDivider]}
+                  >
+                    <Text style={[styles.megaOptionText, active && styles.megaOptionTextActive]}>
+                      {cat.title}
+                    </Text>
+                    {active ? (
+                      <MaterialCommunityIcons name="check" size={18} color={colors.ink} />
+                    ) : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+        </View>
       ) : null}
 
-      <View style={styles.serviceGrid}>
+      <View style={styles.svcList}>
         {visibleServices.map((item) => {
           const active = item.key === selectedService;
           return (
             <Pressable
               key={item.key}
               onPress={() => onSelectService(item.key)}
-              style={[styles.serviceChip, active && { borderColor: item.accent, backgroundColor: tint(item.accent) }]}
+              style={[styles.svcRow, active && { borderColor: item.accent, backgroundColor: tint(item.accent) }]}
             >
-              <MaterialCommunityIcons name={item.icon} size={20} color={item.accent} />
-              <Text style={styles.serviceChipText}>{item.title}</Text>
+              <View
+                style={[
+                  styles.svcIcon,
+                  { backgroundColor: active ? item.accent : tint(item.accent) }
+                ]}
+              >
+                <MaterialCommunityIcons
+                  name={item.icon}
+                  size={22}
+                  color={active ? colors.accentText : item.accent}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.svcTitle}>{item.title}</Text>
+                {item.subtitle ? (
+                  <Text style={styles.svcSub} numberOfLines={1}>
+                    {item.subtitle}
+                  </Text>
+                ) : null}
+              </View>
+              <MaterialCommunityIcons
+                name={active ? "check-circle" : "chevron-right"}
+                size={22}
+                color={active ? item.accent : colors.inkFaint}
+              />
             </Pressable>
           );
         })}
@@ -5940,6 +5980,58 @@ const styles = StyleSheet.create({
     paddingVertical: 9
   },
   serviceChipText: { color: colors.ink, fontSize: 13, fontWeight: "700" },
+  megaSelect: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    borderRadius: radius - 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginTop: 6
+  },
+  megaSelectText: { color: colors.ink, fontSize: 15, fontWeight: "800" },
+  megaMenu: {
+    marginTop: 6,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    borderRadius: radius - 4,
+    overflow: "hidden"
+  },
+  megaOption: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+    paddingVertical: 13
+  },
+  megaOptionDivider: { borderTopWidth: 1, borderTopColor: colors.line },
+  megaOptionText: { color: colors.inkSoft, fontSize: 15, fontWeight: "700" },
+  megaOptionTextActive: { color: colors.ink, fontWeight: "800" },
+  svcList: { gap: 8, paddingVertical: 2 },
+  svcRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    borderRadius: radius - 4,
+    paddingHorizontal: 12,
+    paddingVertical: 11
+  },
+  svcIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  svcTitle: { color: colors.ink, fontSize: 15, fontWeight: "700" },
+  svcSub: { color: colors.inkSoft, fontSize: 12, marginTop: 2 },
   specGroupTitle: { color: colors.inkSoft, fontSize: 12, fontWeight: "700", marginTop: 4 },
   portfolioItem: {
     flexDirection: "row",
