@@ -2,7 +2,7 @@
   "expo": {
     "name": "Кубер",
     "slug": "vodovoz-services",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "icon": "./assets/icon.png",

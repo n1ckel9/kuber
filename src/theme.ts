@@ -96,6 +96,9 @@ export const ui = StyleSheet.create({
     fontWeight: "700"
   },
   pill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     borderRadius: 999,
     borderWidth: 1,
     borderColor: colors.line,

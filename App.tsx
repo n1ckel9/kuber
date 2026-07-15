@@ -7,6 +7,7 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  LayoutAnimation,
   Linking,
   Modal,
   Platform,
@@ -18,6 +19,7 @@ import {
   Switch,
   Text,
   TextInput,
+  UIManager,
   View
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
@@ -1547,6 +1549,51 @@ function RepeatOrderCard({ order, onPress }: { order: Order; onPress: () => void
   );
 }
 
+// Плавные раскрытия/сворачивания (нативно на Android; на web — мгновенно).
+if (Platform.OS === "android" && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+// Запустить лёгкую анимацию перед следующим ре-рендером (list swap, open/close).
+function animate() {
+  LayoutAnimation.configureNext(
+    LayoutAnimation.create(180, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity)
+  );
+}
+
+// Сворачиваемая секция с анимированным заголовком. Держит профиль лёгким:
+// по умолчанию свёрнута, справа — бейдж (напр. «3 выбрано»).
+function Collapsible({
+  title,
+  badge,
+  defaultOpen,
+  children
+}: {
+  title: string;
+  badge?: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(Boolean(defaultOpen));
+  return (
+    <View style={styles.collapse}>
+      <Pressable
+        onPress={() => {
+          animate();
+          setOpen((o) => !o);
+        }}
+        style={({ pressed }) => [styles.collapseHead, pressed && styles.pressedSoft]}
+      >
+        <Text style={styles.collapseTitle}>{title}</Text>
+        <View style={styles.collapseRight}>
+          {badge ? <Text style={styles.collapseBadge}>{badge}</Text> : null}
+          <MaterialCommunityIcons name={open ? "chevron-up" : "chevron-down"} size={20} color={colors.inkSoft} />
+        </View>
+      </Pressable>
+      {open ? <View style={styles.collapseBody}>{children}</View> : null}
+    </View>
+  );
+}
+
 function CreateOrderPanel({
   services,
   categories,
@@ -1700,7 +1747,13 @@ function CreateOrderPanel({
       {showTabs ? (
         <View>
           <Text style={ui.label}>Категория</Text>
-          <Pressable style={styles.megaSelect} onPress={() => setCatOpen((v) => !v)}>
+          <Pressable
+            style={({ pressed }) => [styles.megaSelect, pressed && styles.pressedSoft]}
+            onPress={() => {
+              animate();
+              setCatOpen((v) => !v);
+            }}
+          >
             <Text style={styles.megaSelectText}>{effectiveCatTitle}</Text>
             <MaterialCommunityIcons
               name={catOpen ? "chevron-up" : "chevron-down"}
@@ -1716,10 +1769,15 @@ function CreateOrderPanel({
                   <Pressable
                     key={cat.key}
                     onPress={() => {
+                      animate();
                       setActiveCat(cat.key);
                       setCatOpen(false);
                     }}
-                    style={[styles.megaOption, index > 0 && styles.megaOptionDivider]}
+                    style={({ pressed }) => [
+                      styles.megaOption,
+                      index > 0 && styles.megaOptionDivider,
+                      pressed && styles.pressedSoft
+                    ]}
                   >
                     <Text style={[styles.megaOptionText, active && styles.megaOptionTextActive]}>
                       {cat.title}
@@ -1742,7 +1800,11 @@ function CreateOrderPanel({
             <Pressable
               key={item.key}
               onPress={() => onSelectService(item.key)}
-              style={[styles.svcRow, active && { borderColor: item.accent, backgroundColor: tint(item.accent) }]}
+              style={({ pressed }) => [
+                styles.svcRow,
+                active && { borderColor: item.accent, backgroundColor: tint(item.accent) },
+                pressed && styles.pressedSoft
+              ]}
             >
               <View
                 style={[
@@ -3173,25 +3235,50 @@ function MarketScreen({ cityId, cityName, catalog }: { cityId: string; cityName:
         </Text>
 
         {filterServices.length > 0 ? (
-          <View style={styles.pillWrap}>
-            <Pressable onPress={() => setFilter(null)} style={[ui.pill, !filter && ui.pillActive]}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterRow}
+          >
+            <Pressable
+              onPress={() => {
+                animate();
+                setFilter(null);
+              }}
+              style={({ pressed }) => [ui.pill, !filter && ui.pillActive, pressed && styles.pressedSoft]}
+            >
               <Text style={[ui.pillText, !filter && ui.pillTextActive]}>Все</Text>
             </Pressable>
             {filterServices.map((s) => {
               const on = filter === s.key;
               return (
-                <Pressable key={s.key} onPress={() => setFilter(s.key)} style={[ui.pill, on && ui.pillActive]}>
-                  <Text style={[ui.pillText, on && ui.pillTextActive]}>{s.title}</Text>
+                <Pressable
+                  key={s.key}
+                  onPress={() => {
+                    animate();
+                    setFilter(s.key);
+                  }}
+                  style={({ pressed }) => [
+                    ui.pill,
+                    on && { backgroundColor: tint(s.accent), borderColor: s.accent },
+                    pressed && styles.pressedSoft
+                  ]}
+                >
+                  <MaterialCommunityIcons name={s.icon} size={15} color={on ? s.accent : colors.inkSoft} />
+                  <Text style={[ui.pillText, on && { color: s.accent }]}>{s.title}</Text>
                 </Pressable>
               );
             })}
-          </View>
+          </ScrollView>
         ) : null}
 
         {hasVerified ? (
           <Pressable
-            onPress={() => setVerifiedOnly((v) => !v)}
-            style={[ui.pill, verifiedOnly && ui.pillActive, styles.verifiedFilter]}
+            onPress={() => {
+              animate();
+              setVerifiedOnly((v) => !v);
+            }}
+            style={({ pressed }) => [ui.pill, verifiedOnly && ui.pillActive, styles.verifiedFilter, pressed && styles.pressedSoft]}
           >
             <MaterialCommunityIcons
               name="shield-check"
@@ -3788,6 +3875,10 @@ function VerificationCard({ account, catalog }: { account: Account; catalog: Cat
 
   const myServices = catalog.services.filter((s) => (account.services ?? []).includes(s.key));
   const choices = myServices.length > 0 ? myServices : catalog.services;
+  // Услуги, сгруппированные по мегакатегориям — чтобы не вываливать всё разом.
+  const verifyGroups = (catalog.categories ?? [])
+    .map((c) => ({ title: c.title, items: choices.filter((s) => (s.category || "other") === c.key) }))
+    .filter((g) => g.items.length > 0);
 
   async function submit() {
     if (!service || !docType || !photo) {
@@ -3838,21 +3929,37 @@ function VerificationCard({ account, catalog }: { account: Account; catalog: Cat
 
       <View style={ui.inputGroup}>
         <Text style={ui.label}>Услуга</Text>
-        <View style={styles.pillWrap}>
-          {choices.map((s) => {
-            const on = service === s.key;
-            return (
-              <Pressable
-                key={s.key}
-                onPress={() => setService(s.key)}
-                style={[styles.specChip, on && { borderColor: s.accent, backgroundColor: tint(s.accent) }]}
-              >
-                <MaterialCommunityIcons name={on ? "check" : s.icon} size={16} color={on ? s.accent : colors.inkSoft} />
-                <Text style={styles.specChipText}>{s.title}</Text>
-              </Pressable>
-            );
-          })}
-        </View>
+        {verifyGroups.map((group) => {
+          const chosen = group.items.find((s) => s.key === service);
+          return (
+            <Collapsible
+              key={group.title}
+              title={group.title}
+              badge={chosen ? chosen.title : undefined}
+              defaultOpen={Boolean(chosen)}
+            >
+              <View style={styles.pillWrap}>
+                {group.items.map((s) => {
+                  const on = service === s.key;
+                  return (
+                    <Pressable
+                      key={s.key}
+                      onPress={() => setService(s.key)}
+                      style={({ pressed }) => [
+                        styles.specChip,
+                        on && { borderColor: s.accent, backgroundColor: tint(s.accent) },
+                        pressed && styles.pressedSoft
+                      ]}
+                    >
+                      <MaterialCommunityIcons name={on ? "check" : s.icon} size={16} color={on ? s.accent : colors.inkSoft} />
+                      <Text style={styles.specChipText}>{s.title}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </Collapsible>
+          );
+        })}
       </View>
 
       <View style={ui.inputGroup}>
@@ -4133,30 +4240,41 @@ function ProfilePanel({
         {role === "driver" ? (
           <View style={ui.inputGroup}>
             <Text style={ui.label}>Мои услуги (что выполняю)</Text>
-            {servicesByCategory.map((group) => (
-              <View key={group.title} style={{ gap: 6 }}>
-                <Text style={styles.specGroupTitle}>{group.title}</Text>
-                <View style={styles.pillWrap}>
-                  {group.items.map((s) => {
-                    const on = services.includes(s.key);
-                    return (
-                      <Pressable
-                        key={s.key}
-                        onPress={() => toggleService(s.key)}
-                        style={[styles.specChip, on && { borderColor: s.accent, backgroundColor: tint(s.accent) }]}
-                      >
-                        <MaterialCommunityIcons
-                          name={on ? "check" : s.icon}
-                          size={16}
-                          color={on ? s.accent : colors.inkSoft}
-                        />
-                        <Text style={styles.specChipText}>{s.title}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-            ))}
+            {servicesByCategory.map((group) => {
+              const selCount = group.items.filter((s) => services.includes(s.key)).length;
+              return (
+                <Collapsible
+                  key={group.title}
+                  title={group.title}
+                  badge={selCount ? `${selCount} выбрано` : undefined}
+                  defaultOpen={selCount > 0}
+                >
+                  <View style={styles.pillWrap}>
+                    {group.items.map((s) => {
+                      const on = services.includes(s.key);
+                      return (
+                        <Pressable
+                          key={s.key}
+                          onPress={() => toggleService(s.key)}
+                          style={({ pressed }) => [
+                            styles.specChip,
+                            on && { borderColor: s.accent, backgroundColor: tint(s.accent) },
+                            pressed && styles.pressedSoft
+                          ]}
+                        >
+                          <MaterialCommunityIcons
+                            name={on ? "check" : s.icon}
+                            size={16}
+                            color={on ? s.accent : colors.inkSoft}
+                          />
+                          <Text style={styles.specChipText}>{s.title}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </Collapsible>
+              );
+            })}
             <Text style={styles.locationNote}>Биржа покажет только заказы по выбранным услугам.</Text>
           </View>
         ) : null}
@@ -6032,6 +6150,41 @@ const styles = StyleSheet.create({
   },
   svcTitle: { color: colors.ink, fontSize: 15, fontWeight: "700" },
   svcSub: { color: colors.inkSoft, fontSize: 12, marginTop: 2 },
+  pressedSoft: { opacity: 0.55 },
+  filterRow: { gap: 8, paddingVertical: 2, paddingRight: 8 },
+  collapse: {
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+    borderRadius: radius - 4,
+    overflow: "hidden"
+  },
+  collapseHead: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  collapseTitle: { color: colors.ink, fontSize: 14, fontWeight: "800" },
+  collapseRight: { flexDirection: "row", alignItems: "center", gap: 8 },
+  collapseBadge: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: "700",
+    backgroundColor: tint(colors.accent),
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+    overflow: "hidden"
+  },
+  collapseBody: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    paddingTop: 2,
+    borderTopWidth: 1,
+    borderTopColor: colors.line
+  },
   specGroupTitle: { color: colors.inkSoft, fontSize: 12, fontWeight: "700", marginTop: 4 },
   portfolioItem: {
     flexDirection: "row",
