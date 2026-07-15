@@ -1238,7 +1238,17 @@ export default function App() {
               </View>
 
               {displayOrders.length === 0 ? (
-                <Text style={styles.empty}>{emptyText}</Text>
+                <EmptyState
+                  icon={role === "client" ? "clipboard-text-outline" : "briefcase-search-outline"}
+                  title={
+                    role === "client"
+                      ? "Пока нет заявок"
+                      : viewMode === "jobs"
+                      ? "Нет заказов в работе"
+                      : "Пока нет доступных заказов"
+                  }
+                  subtitle={emptyText}
+                />
               ) : (
                 <FlatList
                   data={displayOrders}
@@ -1590,6 +1600,27 @@ function Collapsible({
         </View>
       </Pressable>
       {open ? <View style={styles.collapseBody}>{children}</View> : null}
+    </View>
+  );
+}
+
+// Дружелюбный пустой экран: иконка в кружке + заголовок + подсказка.
+function EmptyState({
+  icon,
+  title,
+  subtitle
+}: {
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  title: string;
+  subtitle?: string;
+}) {
+  return (
+    <View style={styles.emptyBox}>
+      <View style={styles.emptyIcon}>
+        <MaterialCommunityIcons name={icon} size={28} color={colors.inkFaint} />
+      </View>
+      <Text style={styles.emptyBoxTitle}>{title}</Text>
+      {subtitle ? <Text style={styles.emptyBoxSub}>{subtitle}</Text> : null}
     </View>
   );
 }
@@ -2083,7 +2114,10 @@ function OrderCard({
   const working = order.status !== "open" && order.executor ? order.executor.name : null;
 
   return (
-    <Pressable style={styles.orderCard} onPress={onPress}>
+    <Pressable
+      style={({ pressed }) => [styles.orderCard, pressed && styles.pressedSoft]}
+      onPress={onPress}
+    >
       <View style={[styles.dot, { backgroundColor: service.accent }]} />
       <View style={styles.flex}>
         <View style={styles.rowBetween}>
@@ -3298,11 +3332,15 @@ function MarketScreen({ cityId, cityName, catalog }: { cityId: string; cityName:
         <Text style={styles.locationNote}>Загрузка…</Text>
       ) : shown.length === 0 ? (
         <View style={ui.card}>
-          <Text style={styles.panelSubtitle}>
-            {filter || verifiedOnly
-              ? "Нет техники по выбранному фильтру. Сбросьте фильтр, чтобы увидеть все предложения."
-              : `Пока нет опубликованной техники${cityName ? ` в городе ${cityName}` : ""}. Исполнители появятся здесь, когда разместят предложения.`}
-          </Text>
+          <EmptyState
+            icon={filter || verifiedOnly ? "filter-remove-outline" : "storefront-outline"}
+            title={filter || verifiedOnly ? "Ничего не найдено" : "Витрина пока пуста"}
+            subtitle={
+              filter || verifiedOnly
+                ? "Сбросьте фильтр, чтобы увидеть все предложения."
+                : `Исполнители появятся здесь, когда разместят технику${cityName ? ` в городе ${cityName}` : ""}.`
+            }
+          />
           {filter || verifiedOnly ? (
             <Pressable
               style={ui.ghostButton}
@@ -3322,7 +3360,10 @@ function MarketScreen({ cityId, cityName, catalog }: { cityId: string; cityName:
           return (
             <View key={o.id} style={ui.card}>
               {o.photo ? <Image source={{ uri: o.photo }} style={styles.offerPhoto} resizeMode="cover" /> : null}
-              <Pressable style={styles.offerHead} onPress={() => openProfile(o.executor.id)}>
+              <Pressable
+                style={({ pressed }) => [styles.offerHead, pressed && styles.pressedSoft]}
+                onPress={() => openProfile(o.executor.id)}
+              >
                 <MaterialCommunityIcons name={svc.icon} size={22} color={svc.accent} />
                 <View style={styles.flex}>
                   <Text style={styles.portfolioTitle}>
@@ -3704,24 +3745,15 @@ function EquipmentEditor({ account, catalog }: { account: Account; catalog: Cata
         <Text style={ui.label}>{editingId ? "Редактирование единицы" : "Добавить технику"}</Text>
 
         {!editingId ? (
-          <View style={styles.pillWrap}>
-            {myServices.map((s) => {
-              const on = serviceKey === s.key;
-              return (
-                <Pressable
-                  key={s.key}
-                  onPress={() => {
-                    setServiceKey(s.key);
-                    setSpecs({});
-                  }}
-                  style={[styles.specChip, on && { borderColor: s.accent, backgroundColor: tint(s.accent) }]}
-                >
-                  <MaterialCommunityIcons name={on ? "check" : s.icon} size={16} color={on ? s.accent : colors.inkSoft} />
-                  <Text style={styles.specChipText}>{s.title}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
+          <ServicePicker
+            services={myServices}
+            categories={catalog.categories ?? []}
+            selected={serviceKey}
+            onSelect={(k) => {
+              setServiceKey(k);
+              setSpecs({});
+            }}
+          />
         ) : null}
 
         <TextInput
@@ -6184,6 +6216,18 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.line
   },
+  emptyBox: { alignItems: "center", paddingVertical: 26, paddingHorizontal: 18, gap: 6 },
+  emptyIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: colors.surfaceMuted,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 4
+  },
+  emptyBoxTitle: { color: colors.ink, fontSize: 15, fontWeight: "800", textAlign: "center" },
+  emptyBoxSub: { color: colors.inkSoft, fontSize: 13, textAlign: "center", lineHeight: 18 },
   specGroupTitle: { color: colors.inkSoft, fontSize: 12, fontWeight: "700", marginTop: 4 },
   portfolioItem: {
     flexDirection: "row",
