@@ -1594,6 +1594,123 @@ function Collapsible({
   );
 }
 
+// Единый выбор услуги (как на экране заказа): дропдаун мегакатегории + крупный
+// вертикальный список услуг. Используется и в заказе, и в верификации.
+function ServicePicker({
+  services,
+  categories,
+  selected,
+  onSelect
+}: {
+  services: Service[];
+  categories: Category[];
+  selected: ServiceKey | null;
+  onSelect: (key: ServiceKey) => void;
+}) {
+  const catList = useMemo(() => {
+    const present = new Set(services.map((s) => s.category || "other"));
+    const known = categories.filter((c) => present.has(c.key));
+    const extras = [...present].filter((k) => !categories.some((c) => c.key === k));
+    return [...known, ...extras.map((k) => ({ key: k, title: "Прочее" }))];
+  }, [services, categories]);
+
+  const selectedCat = services.find((s) => s.key === selected)?.category;
+  const [activeCat, setActiveCat] = useState<string>(selectedCat || catList[0]?.key || "other");
+  const [catOpen, setCatOpen] = useState(false);
+
+  // Если выбранная услуга сменила категорию извне — подтягиваем активную.
+  useEffect(() => {
+    if (selectedCat && selectedCat !== activeCat) {
+      setActiveCat(selectedCat);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCat]);
+
+  const showTabs = catList.length > 1;
+  const effectiveCat = catList.some((c) => c.key === activeCat) ? activeCat : catList[0]?.key ?? "other";
+  const effectiveCatTitle = catList.find((c) => c.key === effectiveCat)?.title ?? "Категория";
+  const visible = showTabs ? services.filter((s) => (s.category || "other") === effectiveCat) : services;
+
+  return (
+    <View>
+      {showTabs ? (
+        <View>
+          <Text style={ui.label}>Категория</Text>
+          <Pressable
+            style={({ pressed }) => [styles.megaSelect, pressed && styles.pressedSoft]}
+            onPress={() => {
+              animate();
+              setCatOpen((v) => !v);
+            }}
+          >
+            <Text style={styles.megaSelectText}>{effectiveCatTitle}</Text>
+            <MaterialCommunityIcons name={catOpen ? "chevron-up" : "chevron-down"} size={22} color={colors.inkSoft} />
+          </Pressable>
+          {catOpen ? (
+            <View style={styles.megaMenu}>
+              {catList.map((cat, index) => {
+                const active = cat.key === effectiveCat;
+                return (
+                  <Pressable
+                    key={cat.key}
+                    onPress={() => {
+                      animate();
+                      setActiveCat(cat.key);
+                      setCatOpen(false);
+                    }}
+                    style={({ pressed }) => [
+                      styles.megaOption,
+                      index > 0 && styles.megaOptionDivider,
+                      pressed && styles.pressedSoft
+                    ]}
+                  >
+                    <Text style={[styles.megaOptionText, active && styles.megaOptionTextActive]}>{cat.title}</Text>
+                    {active ? <MaterialCommunityIcons name="check" size={18} color={colors.ink} /> : null}
+                  </Pressable>
+                );
+              })}
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      <View style={styles.svcList}>
+        {visible.map((item) => {
+          const active = item.key === selected;
+          return (
+            <Pressable
+              key={item.key}
+              onPress={() => onSelect(item.key)}
+              style={({ pressed }) => [
+                styles.svcRow,
+                active && { borderColor: item.accent, backgroundColor: tint(item.accent) },
+                pressed && styles.pressedSoft
+              ]}
+            >
+              <View style={[styles.svcIcon, { backgroundColor: active ? item.accent : tint(item.accent) }]}>
+                <MaterialCommunityIcons name={item.icon} size={22} color={active ? colors.accentText : item.accent} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.svcTitle}>{item.title}</Text>
+                {item.subtitle ? (
+                  <Text style={styles.svcSub} numberOfLines={1}>
+                    {item.subtitle}
+                  </Text>
+                ) : null}
+              </View>
+              <MaterialCommunityIcons
+                name={active ? "check-circle" : "chevron-right"}
+                size={22}
+                color={active ? item.accent : colors.inkFaint}
+              />
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 function CreateOrderPanel({
   services,
   categories,
@@ -1649,7 +1766,6 @@ function CreateOrderPanel({
 }) {
   const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
-  const [catOpen, setCatOpen] = useState(false);
   const [repeatDays, setRepeatDays] = useState(0);
   const [repeatOn, setRepeatOn] = useState(false);
   const [priceHint, setPriceHint] = useState<{ count: number; min?: number; max?: number } | null>(null);
@@ -1670,33 +1786,6 @@ function CreateOrderPanel({
 
   // Группируем услуги по категориям. Показываем вкладки категорий, только если
   // их больше одной — иначе просто ленту услуг.
-  const catList = useMemo(() => {
-    const present = new Set(services.map((s) => s.category || "other"));
-    const known = categories.filter((c) => present.has(c.key));
-    const extras = [...present].filter((k) => !categories.some((c) => c.key === k));
-    return [...known, ...extras.map((k) => ({ key: k, title: "Прочее" }))];
-  }, [services, categories]);
-
-  const [activeCat, setActiveCat] = useState<string>(
-    () => service.category || catList[0]?.key || "other"
-  );
-  // Если выбранная услуга сменила категорию (напр. через «повторить заказ») —
-  // подтягиваем активную вкладку под неё.
-  useEffect(() => {
-    if (service.category && service.category !== activeCat) {
-      setActiveCat(service.category);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [service.category]);
-
-  const showTabs = catList.length > 1;
-  // Если активная категория отсутствует в этом городе — берём первую доступную.
-  const effectiveCat = catList.some((c) => c.key === activeCat) ? activeCat : catList[0]?.key ?? "other";
-  const effectiveCatTitle = catList.find((c) => c.key === effectiveCat)?.title ?? "Категория";
-  const visibleServices = showTabs
-    ? services.filter((s) => (s.category || "other") === effectiveCat)
-    : services;
-
   const repeatOptions = [
     { days: 0, label: "Разово" },
     { days: 7, label: "Каждую неделю" },
@@ -1744,97 +1833,12 @@ function CreateOrderPanel({
         </Text>
       </View>
 
-      {showTabs ? (
-        <View>
-          <Text style={ui.label}>Категория</Text>
-          <Pressable
-            style={({ pressed }) => [styles.megaSelect, pressed && styles.pressedSoft]}
-            onPress={() => {
-              animate();
-              setCatOpen((v) => !v);
-            }}
-          >
-            <Text style={styles.megaSelectText}>{effectiveCatTitle}</Text>
-            <MaterialCommunityIcons
-              name={catOpen ? "chevron-up" : "chevron-down"}
-              size={22}
-              color={colors.inkSoft}
-            />
-          </Pressable>
-          {catOpen ? (
-            <View style={styles.megaMenu}>
-              {catList.map((cat, index) => {
-                const active = cat.key === effectiveCat;
-                return (
-                  <Pressable
-                    key={cat.key}
-                    onPress={() => {
-                      animate();
-                      setActiveCat(cat.key);
-                      setCatOpen(false);
-                    }}
-                    style={({ pressed }) => [
-                      styles.megaOption,
-                      index > 0 && styles.megaOptionDivider,
-                      pressed && styles.pressedSoft
-                    ]}
-                  >
-                    <Text style={[styles.megaOptionText, active && styles.megaOptionTextActive]}>
-                      {cat.title}
-                    </Text>
-                    {active ? (
-                      <MaterialCommunityIcons name="check" size={18} color={colors.ink} />
-                    ) : null}
-                  </Pressable>
-                );
-              })}
-            </View>
-          ) : null}
-        </View>
-      ) : null}
-
-      <View style={styles.svcList}>
-        {visibleServices.map((item) => {
-          const active = item.key === selectedService;
-          return (
-            <Pressable
-              key={item.key}
-              onPress={() => onSelectService(item.key)}
-              style={({ pressed }) => [
-                styles.svcRow,
-                active && { borderColor: item.accent, backgroundColor: tint(item.accent) },
-                pressed && styles.pressedSoft
-              ]}
-            >
-              <View
-                style={[
-                  styles.svcIcon,
-                  { backgroundColor: active ? item.accent : tint(item.accent) }
-                ]}
-              >
-                <MaterialCommunityIcons
-                  name={item.icon}
-                  size={22}
-                  color={active ? colors.accentText : item.accent}
-                />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.svcTitle}>{item.title}</Text>
-                {item.subtitle ? (
-                  <Text style={styles.svcSub} numberOfLines={1}>
-                    {item.subtitle}
-                  </Text>
-                ) : null}
-              </View>
-              <MaterialCommunityIcons
-                name={active ? "check-circle" : "chevron-right"}
-                size={22}
-                color={active ? item.accent : colors.inkFaint}
-              />
-            </Pressable>
-          );
-        })}
-      </View>
+      <ServicePicker
+        services={services}
+        categories={categories}
+        selected={selectedService}
+        onSelect={onSelectService}
+      />
 
       <View style={ui.inputGroup}>
         <Text style={ui.label}>Адрес</Text>
@@ -3840,14 +3844,33 @@ function EquipmentEditor({ account, catalog }: { account: Account; catalog: Cata
   );
 }
 
-const DOC_TYPES = [
-  "Удостоверение НАКС",
-  "Лицензия",
-  "Диплом / свидетельство",
-  "Сертификат",
-  "Удостоверение",
-  "Договор ИП / ООО"
-];
+// Типы документов зависят от выбранной услуги (иначе они не по делу).
+// Точечно — по услуге; иначе — по мегакатегории; плюс универсальный «Договор ИП / ООО».
+const DOC_TYPES_BY_SERVICE: Record<string, string[]> = {
+  welder: ["Удостоверение НАКС", "Аттестационное удостоверение", "Сертификат"],
+  electrician: ["Удостоверение по электробезопасности", "Удостоверение", "Сертификат"],
+  lowvoltage: ["Свидетельство о обучении", "Сертификат", "Удостоверение"],
+  plumber: ["Квалификационное удостоверение", "Сертификат"],
+  operators: ["Водительское удостоверение", "Удостоверение тракториста-машиниста", "Удостоверение"],
+  lawyer: ["Диплом юриста", "Адвокатское удостоверение", "Лицензия"],
+  finance: ["Диплом", "Аттестат бухгалтера / аудитора", "Сертификат"],
+  academic: ["Диплом об образовании", "Учёная степень"],
+  webdev: ["Портфолио / кейсы", "Сертификат", "Диплом"],
+  estimate: ["Диплом ПГС", "Свидетельство СРО", "Сертификат"],
+  docs_ppr: ["Диплом ПГС", "Свидетельство СРО", "Сертификат"]
+};
+const DOC_TYPES_BY_CATEGORY: Record<string, string[]> = {
+  tech: ["Права нужной категории", "Удостоверение машиниста / тракториста", "Документ на технику"],
+  specialists: ["Квалификационное удостоверение", "Сертификат", "Диплом / свидетельство"],
+  intellectual: ["Диплом / образование", "Лицензия / СРО", "Сертификат"]
+};
+function docTypesFor(svc?: Service): string[] {
+  const base = svc
+    ? DOC_TYPES_BY_SERVICE[svc.key] ?? DOC_TYPES_BY_CATEGORY[svc.category || ""] ?? []
+    : [];
+  const list = base.length ? base : ["Диплом / свидетельство", "Сертификат", "Удостоверение"];
+  return Array.from(new Set([...list, "Договор ИП / ООО"]));
+}
 
 const verifStatusLabel = (s: string) =>
   s === "verified" ? "подтверждено ✓" : s === "rejected" ? "отклонено" : "на проверке";
@@ -3875,10 +3898,8 @@ function VerificationCard({ account, catalog }: { account: Account; catalog: Cat
 
   const myServices = catalog.services.filter((s) => (account.services ?? []).includes(s.key));
   const choices = myServices.length > 0 ? myServices : catalog.services;
-  // Услуги, сгруппированные по мегакатегориям — чтобы не вываливать всё разом.
-  const verifyGroups = (catalog.categories ?? [])
-    .map((c) => ({ title: c.title, items: choices.filter((s) => (s.category || "other") === c.key) }))
-    .filter((g) => g.items.length > 0);
+  const chosenService = choices.find((s) => s.key === service);
+  const docTypes = docTypesFor(chosenService);
 
   async function submit() {
     if (!service || !docType || !photo) {
@@ -3929,43 +3950,21 @@ function VerificationCard({ account, catalog }: { account: Account; catalog: Cat
 
       <View style={ui.inputGroup}>
         <Text style={ui.label}>Услуга</Text>
-        {verifyGroups.map((group) => {
-          const chosen = group.items.find((s) => s.key === service);
-          return (
-            <Collapsible
-              key={group.title}
-              title={group.title}
-              badge={chosen ? chosen.title : undefined}
-              defaultOpen={Boolean(chosen)}
-            >
-              <View style={styles.pillWrap}>
-                {group.items.map((s) => {
-                  const on = service === s.key;
-                  return (
-                    <Pressable
-                      key={s.key}
-                      onPress={() => setService(s.key)}
-                      style={({ pressed }) => [
-                        styles.specChip,
-                        on && { borderColor: s.accent, backgroundColor: tint(s.accent) },
-                        pressed && styles.pressedSoft
-                      ]}
-                    >
-                      <MaterialCommunityIcons name={on ? "check" : s.icon} size={16} color={on ? s.accent : colors.inkSoft} />
-                      <Text style={styles.specChipText}>{s.title}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-            </Collapsible>
-          );
-        })}
+        <ServicePicker
+          services={choices}
+          categories={catalog.categories ?? []}
+          selected={service}
+          onSelect={(k) => {
+            setService(k);
+            setDocType("");
+          }}
+        />
       </View>
 
       <View style={ui.inputGroup}>
         <Text style={ui.label}>Тип документа</Text>
         <View style={styles.pillWrap}>
-          {DOC_TYPES.map((d) => (
+          {docTypes.map((d) => (
             <Pressable
               key={d}
               onPress={() => setDocType(d)}
