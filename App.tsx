@@ -10,6 +10,7 @@ import {
   LayoutAnimation,
   Linking,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   RefreshControl,
@@ -298,6 +299,7 @@ export default function App() {
     }
     return null;
   }, []);
+  const [hintDismissed, setHintDismissed] = useState(false);
 
   // Исполнителю на бирже: фильтр по рабочему радиусу + сортировка по близости.
   const displayOrders = useMemo(() => {
@@ -1149,14 +1151,13 @@ export default function App() {
               keyboardShouldPersistTaps="handled"
               refreshControl={<RefreshControl refreshing={refreshing} onRefresh={loadOrders} />}
             >
-              {role === "client" && seasonalHint ? (
-                <View style={styles.seasonCard}>
-                  <MaterialCommunityIcons name={seasonalHint.icon} size={22} color={colors.ink} />
-                  <View style={styles.flex}>
-                    <Text style={styles.repeatKicker}>{seasonalHint.title}</Text>
-                    <Text style={styles.panelSubtitle}>{seasonalHint.text}</Text>
-                  </View>
-                </View>
+              {role === "client" && seasonalHint && !hintDismissed ? (
+                <DismissibleBanner
+                  icon={seasonalHint.icon}
+                  title={seasonalHint.title}
+                  text={seasonalHint.text}
+                  onDismiss={() => setHintDismissed(true)}
+                />
               ) : null}
               {role === "client" && favoriteExecutors.length > 0 ? (
                 <View style={ui.card}>
@@ -1694,6 +1695,63 @@ function EmptyState({
       <Text style={styles.emptyBoxTitle}>{title}</Text>
       {subtitle ? <Text style={styles.emptyBoxSub}>{subtitle}</Text> : null}
     </View>
+  );
+}
+
+// Промо-баннер, который можно смахнуть в сторону или закрыть крестиком.
+function DismissibleBanner({
+  icon,
+  title,
+  text,
+  onDismiss
+}: {
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+  title: string;
+  text: string;
+  onDismiss: () => void;
+}) {
+  const pan = useRef(new Animated.ValueXY()).current;
+  const opacity = useRef(new Animated.Value(1)).current;
+  const flyOut = (dir: number) =>
+    Animated.timing(pan, {
+      toValue: { x: dir * 500, y: 0 },
+      duration: 180,
+      useNativeDriver: true
+    }).start(onDismiss);
+  const responder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 8 && Math.abs(g.dx) > Math.abs(g.dy),
+      onPanResponderMove: (_, g) => {
+        pan.x.setValue(g.dx);
+        opacity.setValue(Math.max(0, 1 - Math.abs(g.dx) / 220));
+      },
+      onPanResponderRelease: (_, g) => {
+        if (Math.abs(g.dx) > 110) {
+          flyOut(g.dx > 0 ? 1 : -1);
+        } else {
+          Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: true }).start();
+          Animated.timing(opacity, { toValue: 1, duration: 150, useNativeDriver: true }).start();
+        }
+      }
+    })
+  ).current;
+  return (
+    <Animated.View
+      style={[styles.seasonCard, { transform: pan.getTranslateTransform(), opacity }]}
+      {...responder.panHandlers}
+    >
+      <MaterialCommunityIcons name={icon} size={22} color={colors.accent} />
+      <View style={styles.flex}>
+        <Text style={styles.repeatKicker}>{title}</Text>
+        <Text style={styles.panelSubtitle}>{text}</Text>
+      </View>
+      <Pressable
+        hitSlop={10}
+        onPress={() => Animated.timing(opacity, { toValue: 0, duration: 150, useNativeDriver: true }).start(onDismiss)}
+      >
+        <MaterialCommunityIcons name="close" size={18} color={colors.inkFaint} />
+      </Pressable>
+    </Animated.View>
   );
 }
 
