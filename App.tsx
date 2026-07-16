@@ -1697,6 +1697,49 @@ function EmptyState({
   );
 }
 
+// Часто заказываемые услуги — большие понятные плитки на входе (для тех, кому
+// не нужны манипуляторы/сварщики). Порядок = приоритет показа.
+const POPULAR_KEYS = ["water", "septic", "dump", "loader", "cleaning", "plumber"];
+
+// Одна строка услуги: иконка в кружке + название + подпись + галочка/шеврон.
+function ServiceRow({
+  item,
+  active,
+  onPress
+}: {
+  item: Service;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.svcRow,
+        active && { borderColor: item.accent, backgroundColor: tint(item.accent) },
+        pressed && styles.pressedSoft
+      ]}
+    >
+      <View style={[styles.svcIcon, { backgroundColor: active ? item.accent : tint(item.accent) }]}>
+        <MaterialCommunityIcons name={item.icon} size={22} color={active ? colors.accentText : item.accent} />
+      </View>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.svcTitle}>{item.title}</Text>
+        {item.subtitle ? (
+          <Text style={styles.svcSub} numberOfLines={1}>
+            {item.subtitle}
+          </Text>
+        ) : null}
+      </View>
+      <MaterialCommunityIcons
+        name={active ? "check-circle" : "chevron-right"}
+        size={22}
+        color={active ? item.accent : colors.inkFaint}
+      />
+    </Pressable>
+  );
+}
+
 // Единый выбор услуги (как на экране заказа): дропдаун мегакатегории + крупный
 // вертикальный список услуг. Используется и в заказе, и в верификации.
 function ServicePicker({
@@ -1778,37 +1821,14 @@ function ServicePicker({
       ) : null}
 
       <View style={styles.svcList}>
-        {visible.map((item) => {
-          const active = item.key === selected;
-          return (
-            <Pressable
-              key={item.key}
-              onPress={() => onSelect(item.key)}
-              style={({ pressed }) => [
-                styles.svcRow,
-                active && { borderColor: item.accent, backgroundColor: tint(item.accent) },
-                pressed && styles.pressedSoft
-              ]}
-            >
-              <View style={[styles.svcIcon, { backgroundColor: active ? item.accent : tint(item.accent) }]}>
-                <MaterialCommunityIcons name={item.icon} size={22} color={active ? colors.accentText : item.accent} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.svcTitle}>{item.title}</Text>
-                {item.subtitle ? (
-                  <Text style={styles.svcSub} numberOfLines={1}>
-                    {item.subtitle}
-                  </Text>
-                ) : null}
-              </View>
-              <MaterialCommunityIcons
-                name={active ? "check-circle" : "chevron-right"}
-                size={22}
-                color={active ? item.accent : colors.inkFaint}
-              />
-            </Pressable>
-          );
-        })}
+        {visible.map((item) => (
+          <ServiceRow
+            key={item.key}
+            item={item}
+            active={item.key === selected}
+            onPress={() => onSelect(item.key)}
+          />
+        ))}
       </View>
     </View>
   );
@@ -1869,10 +1889,21 @@ function CreateOrderPanel({
 }) {
   const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [allOpen, setAllOpen] = useState(false);
   const [repeatDays, setRepeatDays] = useState(0);
   const [repeatOn, setRepeatOn] = useState(false);
   const [priceHint, setPriceHint] = useState<{ count: number; min?: number; max?: number } | null>(null);
   const skipNextRef = useRef(false);
+
+  // Часто заказываемые (только те, что есть в этом городе) + поиск по всем услугам.
+  const popularServices = POPULAR_KEYS.map((k) => services.find((s) => s.key === k)).filter(
+    (s): s is Service => Boolean(s)
+  );
+  const q = query.trim().toLowerCase();
+  const searchResults = q
+    ? services.filter((s) => `${s.title} ${s.subtitle ?? ""}`.toLowerCase().includes(q)).slice(0, 12)
+    : [];
 
   // Подсказка цены по (город × услуга) — обновляется при смене услуги/города.
   useEffect(() => {
@@ -1936,12 +1967,87 @@ function CreateOrderPanel({
         </Text>
       </View>
 
-      <ServicePicker
-        services={services}
-        categories={categories}
-        selected={selectedService}
-        onSelect={onSelectService}
-      />
+      <View style={ui.inputGroup}>
+        <View style={styles.svcSearchWrap}>
+          <MaterialCommunityIcons name="magnify" size={20} color={colors.inkFaint} />
+          <TextInput
+            value={query}
+            onChangeText={setQuery}
+            placeholder="Что нужно? Напр. вода, вывоз, грузчики"
+            placeholderTextColor={colors.inkFaint}
+            style={styles.svcSearchInput}
+          />
+          {query ? (
+            <Pressable hitSlop={8} onPress={() => setQuery("")}>
+              <MaterialCommunityIcons name="close-circle" size={18} color={colors.inkFaint} />
+            </Pressable>
+          ) : null}
+        </View>
+
+        {q ? (
+          searchResults.length ? (
+            <View style={styles.svcList}>
+              {searchResults.map((item) => (
+                <ServiceRow
+                  key={item.key}
+                  item={item}
+                  active={item.key === selectedService}
+                  onPress={() => {
+                    onSelectService(item.key);
+                    setQuery("");
+                  }}
+                />
+              ))}
+            </View>
+          ) : (
+            <Text style={styles.locationNote}>
+              Ничего не нашли по «{query.trim()}». Откройте «Все услуги» ниже.
+            </Text>
+          )
+        ) : (
+          <>
+            {popularServices.length ? (
+              <>
+                <Text style={ui.label}>Часто заказывают</Text>
+                <View style={styles.svcList}>
+                  {popularServices.map((item) => (
+                    <ServiceRow
+                      key={item.key}
+                      item={item}
+                      active={item.key === selectedService}
+                      onPress={() => onSelectService(item.key)}
+                    />
+                  ))}
+                </View>
+              </>
+            ) : null}
+
+            <Pressable
+              style={({ pressed }) => [styles.allServicesBtn, pressed && styles.pressedSoft]}
+              onPress={() => {
+                animate();
+                setAllOpen((v) => !v);
+              }}
+            >
+              <MaterialCommunityIcons name="view-grid-outline" size={18} color={colors.accent} />
+              <Text style={styles.allServicesText}>Все услуги — техника, мастера и другое</Text>
+              <MaterialCommunityIcons
+                name={allOpen ? "chevron-up" : "chevron-down"}
+                size={20}
+                color={colors.accent}
+              />
+            </Pressable>
+            {allOpen ? (
+              <ServicePicker
+                services={services}
+                categories={categories}
+                selected={selectedService}
+                onSelect={onSelectService}
+              />
+            ) : null}
+          </>
+        )}
+      </View>
 
       <View style={ui.inputGroup}>
         <Text style={ui.label}>Адрес</Text>
@@ -6257,6 +6363,29 @@ const styles = StyleSheet.create({
   },
   svcTitle: { color: colors.ink, fontSize: 15, fontWeight: "700" },
   svcSub: { color: colors.inkSoft, fontSize: 12, marginTop: 2 },
+  svcSearchWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.surfaceMuted,
+    borderRadius: radius - 4,
+    borderWidth: 1,
+    borderColor: colors.line,
+    paddingHorizontal: 12,
+    minHeight: 48
+  },
+  svcSearchInput: { flex: 1, color: colors.ink, fontSize: 15, fontWeight: "500", paddingVertical: 10 },
+  allServicesBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: colors.accentSoft,
+    borderRadius: radius - 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginTop: 2
+  },
+  allServicesText: { flex: 1, color: colors.accent, fontSize: 14, fontWeight: "700" },
   pressedSoft: { opacity: 0.55 },
   filterRow: { gap: 8, paddingVertical: 2, paddingRight: 8 },
   collapse: {
