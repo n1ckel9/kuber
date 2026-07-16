@@ -9,7 +9,7 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#1A1A1A"
+      "backgroundColor": "#4F46E5"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -35,7 +35,7 @@
       "package": "ru.vodovoz.services",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#1A1A1A"
+        "backgroundColor": "#4F46E5"
       }
     },
     "web": {

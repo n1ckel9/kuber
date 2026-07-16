@@ -4816,7 +4816,7 @@ function AdminPricingPanel({ cities }: { cities: City[] }) {
             <Pressable
               key={s.key}
               onPress={() => setBulkService(bulkService === s.key ? null : s.key)}
-              style={[styles.placeChip, bulkService === s.key && { borderColor: colors.ink, backgroundColor: colors.surfaceMuted }]}
+              style={[styles.placeChip, bulkService === s.key && { borderColor: colors.accent, backgroundColor: colors.accentSoft }]}
             >
               <Text style={styles.placeChipText}>{s.name}</Text>
             </Pressable>
@@ -5307,7 +5307,7 @@ function AdminCatalogPanel({ catalog, onChanged }: { catalog: Catalog; onChanged
         <TextInput value={sSub} onChangeText={setSSub} placeholder="подзаголовок" placeholderTextColor={colors.inkFaint} style={ui.input} />
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.placeRow}>
           {CATALOG_ICONS.map((ic) => (
-            <Pressable key={ic} onPress={() => setSIcon(ic)} style={[styles.iconChoice, sIcon === ic && { borderColor: colors.ink, borderWidth: 2 }]}>
+            <Pressable key={ic} onPress={() => setSIcon(ic)} style={[styles.iconChoice, sIcon === ic && { borderColor: colors.accent, borderWidth: 2 }]}>
               <MaterialCommunityIcons name={ic as keyof typeof MaterialCommunityIcons.glyphMap} size={22} color={colors.ink} />
             </Pressable>
           ))}
@@ -6235,7 +6235,7 @@ const styles = StyleSheet.create({
   },
   megaOptionDivider: { borderTopWidth: 1, borderTopColor: colors.line },
   megaOptionText: { color: colors.inkSoft, fontSize: 15, fontWeight: "700" },
-  megaOptionTextActive: { color: colors.ink, fontWeight: "800" },
+  megaOptionTextActive: { color: colors.accent, fontWeight: "800" },
   svcList: { gap: 8, paddingVertical: 2 },
   svcRow: {
     flexDirection: "row",
