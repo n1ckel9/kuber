@@ -116,7 +116,7 @@ import { formatKm, getCurrentPosition, haversineKm } from "./src/geo";
 import { MapView } from "./src/MapView";
 import { getPushToken, onNotificationTap } from "./src/push";
 import { clearToken, loadToken, saveToken } from "./src/storage";
-import { colors, radius, ui } from "./src/theme";
+import { cardShadow, colors, radius, ui } from "./src/theme";
 import {
   Account,
   AuthResponse,
@@ -2051,7 +2051,7 @@ function CreateOrderPanel({
               setRepeatOn(v);
               setRepeatDays(v ? repeatDays || 7 : 0);
             }}
-            trackColor={{ true: colors.ink, false: colors.line }}
+            trackColor={{ true: colors.accent, false: colors.line }}
             thumbColor={colors.surface}
           />
         </View>
@@ -3868,7 +3868,7 @@ function EquipmentEditor({ account, catalog }: { account: Account; catalog: Cata
               <Switch
                 value={Boolean(specs[f.key])}
                 onValueChange={(v) => setField(f.key, v)}
-                trackColor={{ true: colors.ink, false: colors.line }}
+                trackColor={{ true: colors.accent, false: colors.line }}
                 thumbColor={colors.surface}
               />
             ) : (
@@ -3894,7 +3894,7 @@ function EquipmentEditor({ account, catalog }: { account: Account; catalog: Cata
           <Switch
             value={published}
             onValueChange={setPublished}
-            trackColor={{ true: colors.ink, false: colors.line }}
+            trackColor={{ true: colors.accent, false: colors.line }}
             thumbColor={colors.surface}
           />
         </View>
@@ -4504,7 +4504,7 @@ function ProfilePanel({
           <Switch
             value={devMode}
             onValueChange={onToggleDev}
-            trackColor={{ true: colors.ink, false: colors.line }}
+            trackColor={{ true: colors.accent, false: colors.line }}
             thumbColor={colors.surface}
           />
         </View>
@@ -4686,7 +4686,7 @@ function PricingRow({
       <Switch
         value={enabled}
         onValueChange={commit}
-        trackColor={{ true: colors.ink, false: colors.line }}
+        trackColor={{ true: colors.accent, false: colors.line }}
         thumbColor={colors.surface}
       />
     </View>
@@ -5346,7 +5346,7 @@ function AdminCatalogPanel({ catalog, onChanged }: { catalog: Catalog; onChanged
               <Switch
                 value={on}
                 onValueChange={(v) => toggleAvail(s.key, v)}
-                trackColor={{ true: colors.ink, false: colors.line }}
+                trackColor={{ true: colors.accent, false: colors.line }}
                 thumbColor={colors.surface}
               />
             </View>
@@ -6160,7 +6160,11 @@ const styles = StyleSheet.create({
     bottom: 4,
     left: 0,
     borderRadius: 999,
-    backgroundColor: colors.surface
+    backgroundColor: colors.surface,
+    ...cardShadow,
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 }
   },
   segmentButton: {
     flex: 1,
@@ -6171,7 +6175,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6
   },
   segmentText: { color: colors.inkSoft, fontSize: 13, fontWeight: "700" },
-  segmentTextActive: { color: colors.ink },
+  segmentTextActive: { color: colors.accent, fontWeight: "800" },
   content: { paddingHorizontal: 18, paddingBottom: 32, gap: 16 },
   panelTitle: { color: colors.ink, fontSize: 18, fontWeight: "800" },
   panelSubtitle: { color: colors.inkSoft, fontSize: 13, marginTop: 2 },
@@ -6186,7 +6190,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line
   },
-  categoryTabActive: { backgroundColor: colors.ink, borderColor: colors.ink },
+  categoryTabActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   categoryTabText: { color: colors.inkSoft, fontSize: 13, fontWeight: "700" },
   categoryTabTextActive: { color: colors.accentText },
   serviceChip: {
@@ -6361,7 +6365,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceMuted,
     overflow: "hidden"
   },
-  analyticsBarFill: { height: "100%", backgroundColor: colors.ink, borderRadius: 4 },
+  analyticsBarFill: { height: "100%", backgroundColor: colors.accent, borderRadius: 4 },
   analyticsCount: { color: colors.inkSoft, fontSize: 13, fontWeight: "700", minWidth: 28, textAlign: "right" },
   analyticsMoney: { color: colors.ink, fontSize: 12, fontWeight: "700", minWidth: 84, textAlign: "right" },
   metricGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
@@ -6583,7 +6587,8 @@ const styles = StyleSheet.create({
     borderRadius: radius,
     borderWidth: 1,
     borderColor: colors.line,
-    padding: 14
+    padding: 14,
+    ...cardShadow
   },
   dot: { width: 10, height: 10, borderRadius: 5, marginTop: 6 },
   orderTitle: { color: colors.ink, fontSize: 16, fontWeight: "800" },

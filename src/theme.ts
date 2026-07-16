@@ -1,30 +1,40 @@
 import { StyleSheet } from "react-native";
 
-// Минималистичная палитра: тёплый фон, белые карточки, тонкие линии,
-// чёрная основная кнопка. Цветные акценты услуг используются точечно.
+// Чистая светлая палитра с фирменным индиго-акцентом. Текст — сине-чёрный,
+// бренд — индиго (кнопки, активные состояния, акценты). Цвета услуг — точечно.
 export const colors = {
-  bg: "#F7F4EE",
+  bg: "#F4F6FB",
   surface: "#FFFFFF",
-  surfaceMuted: "#F3F0E9",
-  line: "#E9E3D8",
-  ink: "#1A1A1A",
-  inkSoft: "#6B6B6B",
-  inkFaint: "#9A958C",
-  accent: "#1A1A1A",
+  surfaceMuted: "#EDF0F7",
+  line: "#E3E8F2",
+  ink: "#151A24",
+  inkSoft: "#5B6474",
+  inkFaint: "#98A1B3",
+  accent: "#4F46E5",
+  accentSoft: "#EEF0FE",
   accentText: "#FFFFFF",
-  positive: "#3F6B3A",
-  positiveBg: "#EAF0E6",
-  warning: "#9A5A2B",
-  warningBg: "#F4EAE0",
+  positive: "#15A05A",
+  positiveBg: "#E4F5EA",
+  warning: "#C05621",
+  warningBg: "#F7EADF",
   // Акценты для повторяющихся значков (вынесены из разбросанного хардкода).
-  verified: "#2E7D5B",
-  star: "#E0A93B",
-  favorite: "#C7503A",
-  coinBg: "#E7B54B",
+  verified: "#0E9F8E",
+  star: "#F59E0B",
+  favorite: "#EF4444",
+  coinBg: "#F0B84A",
   coinText: "#5C3D0E"
 };
 
-export const radius = 14;
+export const radius = 16;
+
+// Мягкая тень карточек (кроссплатформенно: iOS shadow* / Android elevation / web boxShadow).
+export const cardShadow = {
+  shadowColor: "#151A24",
+  shadowOpacity: 0.06,
+  shadowRadius: 14,
+  shadowOffset: { width: 0, height: 6 },
+  elevation: 2
+};
 
 // Переиспользуемые «атомы» интерфейса — общие для экрана входа и приложения.
 export const ui = StyleSheet.create({
@@ -38,7 +48,8 @@ export const ui = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.line,
     padding: 16,
-    gap: 14
+    gap: 14,
+    ...cardShadow
   },
   label: {
     color: colors.inkFaint,
@@ -107,8 +118,8 @@ export const ui = StyleSheet.create({
     paddingVertical: 9
   },
   pillActive: {
-    backgroundColor: colors.ink,
-    borderColor: colors.ink
+    backgroundColor: colors.accent,
+    borderColor: colors.accent
   },
   pillText: {
     color: colors.inkSoft,
