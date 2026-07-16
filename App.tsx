@@ -15,12 +15,14 @@ import {
   RefreshControl,
   ScrollView,
   Share,
+  StyleProp,
   StyleSheet,
   Switch,
   Text,
   TextInput,
   UIManager,
-  View
+  View,
+  ViewStyle
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
@@ -1604,6 +1606,76 @@ function Collapsible({
   );
 }
 
+// Пульсация для скелетонов загрузки.
+function usePulse() {
+  const opacity = useRef(new Animated.Value(0.5)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 650, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.5, duration: 650, useNativeDriver: true })
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity]);
+  return opacity;
+}
+
+function SkeletonBlock({ style }: { style?: StyleProp<ViewStyle> }) {
+  const opacity = usePulse();
+  return <Animated.View style={[styles.skelBlock, style, { opacity }]} />;
+}
+
+// Скелетон карточки объявления (пока грузится витрина).
+function OfferSkeleton() {
+  return (
+    <View style={ui.card}>
+      <View style={styles.skelRow}>
+        <SkeletonBlock style={styles.skelAvatar} />
+        <View style={styles.flex}>
+          <SkeletonBlock style={{ height: 14, width: "65%", marginBottom: 8 }} />
+          <SkeletonBlock style={{ height: 12, width: "40%" }} />
+        </View>
+      </View>
+      <SkeletonBlock style={{ height: 12, width: "90%", marginTop: 14 }} />
+      <SkeletonBlock style={{ height: 40, width: "100%", marginTop: 14, borderRadius: 12 }} />
+    </View>
+  );
+}
+
+// Цветной статус-чип заказа: цвет + иконка + короткая метка.
+function orderStatusMeta(status: Order["status"]): {
+  label: string;
+  color: string;
+  icon: keyof typeof MaterialCommunityIcons.glyphMap;
+} {
+  switch (status) {
+    case "open":
+      return { label: "Открыта", color: colors.star, icon: "clock-outline" };
+    case "matched":
+      return { label: "В работе", color: colors.verified, icon: "progress-wrench" };
+    case "enroute":
+      return { label: "В пути", color: colors.positive, icon: "truck-fast-outline" };
+    case "finished":
+      return { label: "Ждёт подтверждения", color: colors.warning, icon: "timer-sand" };
+    case "cancelled":
+      return { label: "Отменена", color: colors.inkFaint, icon: "close-circle-outline" };
+    default:
+      return { label: "Выполнена", color: colors.positive, icon: "check-circle-outline" };
+  }
+}
+
+function StatusChip({ status }: { status: Order["status"] }) {
+  const m = orderStatusMeta(status);
+  return (
+    <View style={[styles.statusChip, { backgroundColor: tint(m.color) }]}>
+      <MaterialCommunityIcons name={m.icon} size={12} color={m.color} />
+      <Text style={[styles.statusChipText, { color: m.color }]}>{m.label}</Text>
+    </View>
+  );
+}
+
 // Дружелюбный пустой экран: иконка в кружке + заголовок + подсказка.
 function EmptyState({
   icon,
@@ -2156,11 +2228,7 @@ function OrderCard({
               <Text style={styles.orderMeta}>
                 · {bids} {plural(bids, "отклик", "отклика", "откликов")}
               </Text>
-              <View style={[styles.badge, order.status !== "open" && styles.badgeMatched]}>
-                <Text style={[styles.badgeText, order.status !== "open" && styles.badgeTextMatched]}>
-                  {statusLabel(order.status)}
-                </Text>
-              </View>
+              <StatusChip status={order.status} />
             </>
           )}
         </View>
@@ -3329,7 +3397,11 @@ function MarketScreen({ cityId, cityName, catalog }: { cityId: string; cityName:
       </View>
 
       {loading ? (
-        <Text style={styles.locationNote}>Загрузка…</Text>
+        <View style={{ gap: 12 }}>
+          <OfferSkeleton />
+          <OfferSkeleton />
+          <OfferSkeleton />
+        </View>
       ) : shown.length === 0 ? (
         <View style={ui.card}>
           <EmptyState
@@ -6228,6 +6300,18 @@ const styles = StyleSheet.create({
   },
   emptyBoxTitle: { color: colors.ink, fontSize: 15, fontWeight: "800", textAlign: "center" },
   emptyBoxSub: { color: colors.inkSoft, fontSize: 13, textAlign: "center", lineHeight: 18 },
+  skelBlock: { backgroundColor: colors.surfaceMuted, borderRadius: 8 },
+  skelRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  skelAvatar: { width: 44, height: 44, borderRadius: 22 },
+  statusChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3
+  },
+  statusChipText: { fontSize: 11, fontWeight: "800" },
   specGroupTitle: { color: colors.inkSoft, fontSize: 12, fontWeight: "700", marginTop: 4 },
   portfolioItem: {
     flexDirection: "row",
