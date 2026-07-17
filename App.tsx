@@ -1755,9 +1755,17 @@ function DismissibleBanner({
   );
 }
 
-// Часто заказываемые услуги — большие понятные плитки на входе (для тех, кому
-// не нужны манипуляторы/сварщики). Порядок = приоритет показа.
-const POPULAR_KEYS = ["water", "septic", "dump", "loader", "cleaning", "plumber"];
+// Вход в заказ — три большие кнопки мегакатегорий (+ «Все услуги»).
+// Иконка и цвет заданы здесь, подсказка со списком строится из каталога.
+const CATEGORY_LOOK: Record<
+  string,
+  { icon: keyof typeof MaterialCommunityIcons.glyphMap; color: string }
+> = {
+  tech: { icon: "excavator", color: "#4F46E5" },
+  specialists: { icon: "account-hard-hat", color: "#0E9F8E" },
+  intellectual: { icon: "laptop", color: "#7C3AED" }
+};
+const ALL_CAT = "__all__";
 
 // Одна строка услуги: иконка в кружке + название + подпись + галочка/шеврон.
 function ServiceRow({
@@ -1948,20 +1956,35 @@ function CreateOrderPanel({
   const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [allOpen, setAllOpen] = useState(false);
+  // Шаги: категория не выбрана -> большие кнопки; выбрана -> список услуг;
+  // услуга подтверждена (chosen) -> плашка заказа.
+  const [cat, setCat] = useState<string | null>(null);
+  const [chosen, setChosen] = useState(false);
   const [repeatDays, setRepeatDays] = useState(0);
   const [repeatOn, setRepeatOn] = useState(false);
   const [priceHint, setPriceHint] = useState<{ count: number; min?: number; max?: number } | null>(null);
   const skipNextRef = useRef(false);
 
-  // Часто заказываемые (только те, что есть в этом городе) + поиск по всем услугам.
-  const popularServices = POPULAR_KEYS.map((k) => services.find((s) => s.key === k)).filter(
-    (s): s is Service => Boolean(s)
+  // Мегакатегории, в которых реально есть услуги в этом городе.
+  const catList = useMemo(
+    () => categories.filter((c) => services.some((s) => (s.category || "other") === c.key)),
+    [services, categories]
   );
+  const stepServices =
+    cat === ALL_CAT ? services : services.filter((s) => (s.category || "other") === cat);
+  const catTitle = cat === ALL_CAT ? "Все услуги" : catList.find((c) => c.key === cat)?.title ?? "";
+
   const q = query.trim().toLowerCase();
   const searchResults = q
     ? services.filter((s) => `${s.title} ${s.subtitle ?? ""}`.toLowerCase().includes(q)).slice(0, 12)
     : [];
+
+  function pickService(key: ServiceKey) {
+    animate();
+    onSelectService(key);
+    setChosen(true);
+    setQuery("");
+  }
 
   // Подсказка цены по (город × услуга) — обновляется при смене услуги/города.
   useEffect(() => {
@@ -2021,92 +2044,130 @@ function CreateOrderPanel({
       <View>
         <Text style={styles.panelTitle}>Новая заявка</Text>
         <Text style={styles.panelSubtitle}>
-          {service.title} · {cityName}
+          {chosen ? `${service.title} · ${cityName}` : `Что нужно сделать? · ${cityName}`}
         </Text>
       </View>
 
-      <View style={ui.inputGroup}>
-        <View style={styles.svcSearchWrap}>
-          <MaterialCommunityIcons name="magnify" size={20} color={colors.inkFaint} />
-          <TextInput
-            value={query}
-            onChangeText={setQuery}
-            placeholder="Что нужно? Напр. вода, вывоз, грузчики"
-            placeholderTextColor={colors.inkFaint}
-            style={styles.svcSearchInput}
-          />
-          {query ? (
-            <Pressable hitSlop={8} onPress={() => setQuery("")}>
-              <MaterialCommunityIcons name="close-circle" size={18} color={colors.inkFaint} />
-            </Pressable>
-          ) : null}
-        </View>
+      {chosen ? (
+        // Шаг 3: выбранная услуга + возможность поменять.
+        <Pressable
+          onPress={() => {
+            animate();
+            setChosen(false);
+          }}
+          style={({ pressed }) => [styles.chosenRow, pressed && styles.pressedSoft]}
+        >
+          <View style={[styles.svcIcon, { backgroundColor: service.accent }]}>
+            <MaterialCommunityIcons name={service.icon} size={22} color={colors.accentText} />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.svcTitle}>{service.title}</Text>
+            {service.subtitle ? <Text style={styles.svcSub}>{service.subtitle}</Text> : null}
+          </View>
+          <Text style={styles.changeLink}>Изменить</Text>
+        </Pressable>
+      ) : (
+        <View style={ui.inputGroup}>
+          <View style={styles.svcSearchWrap}>
+            <MaterialCommunityIcons name="magnify" size={20} color={colors.inkFaint} />
+            <TextInput
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Поиск: вода, вывоз, грузчики…"
+              placeholderTextColor={colors.inkFaint}
+              style={styles.svcSearchInput}
+            />
+            {query ? (
+              <Pressable hitSlop={8} onPress={() => setQuery("")}>
+                <MaterialCommunityIcons name="close-circle" size={18} color={colors.inkFaint} />
+              </Pressable>
+            ) : null}
+          </View>
 
-        {q ? (
-          searchResults.length ? (
-            <View style={styles.svcList}>
-              {searchResults.map((item) => (
-                <ServiceRow
-                  key={item.key}
-                  item={item}
-                  active={item.key === selectedService}
-                  onPress={() => {
-                    onSelectService(item.key);
-                    setQuery("");
-                  }}
-                />
-              ))}
-            </View>
+          {q ? (
+            // Поиск поверх шагов — сразу к услуге.
+            searchResults.length ? (
+              <View style={styles.svcList}>
+                {searchResults.map((item) => (
+                  <ServiceRow key={item.key} item={item} active={false} onPress={() => pickService(item.key)} />
+                ))}
+              </View>
+            ) : (
+              <Text style={styles.locationNote}>Ничего не нашли по «{query.trim()}».</Text>
+            )
+          ) : cat ? (
+            // Шаг 2: услуги внутри выбранной категории.
+            <>
+              <Pressable
+                onPress={() => {
+                  animate();
+                  setCat(null);
+                }}
+                style={({ pressed }) => [styles.backRow, pressed && styles.pressedSoft]}
+              >
+                <MaterialCommunityIcons name="chevron-left" size={22} color={colors.accent} />
+                <Text style={styles.backText}>{catTitle}</Text>
+              </Pressable>
+              <View style={styles.svcList}>
+                {stepServices.map((item) => (
+                  <ServiceRow key={item.key} item={item} active={false} onPress={() => pickService(item.key)} />
+                ))}
+              </View>
+            </>
           ) : (
-            <Text style={styles.locationNote}>
-              Ничего не нашли по «{query.trim()}». Откройте «Все услуги» ниже.
-            </Text>
-          )
-        ) : (
-          <>
-            {popularServices.length ? (
-              <>
-                <Text style={ui.label}>Часто заказывают</Text>
-                <View style={styles.svcList}>
-                  {popularServices.map((item) => (
-                    <ServiceRow
-                      key={item.key}
-                      item={item}
-                      active={item.key === selectedService}
-                      onPress={() => onSelectService(item.key)}
-                    />
-                  ))}
-                </View>
-              </>
-            ) : null}
+            // Шаг 1: три большие кнопки мегакатегорий + «Все услуги».
+            <View style={styles.catGrid}>
+              {catList.map((c) => {
+                const look = CATEGORY_LOOK[c.key] ?? { icon: "shape-outline" as const, color: colors.accent };
+                const hint = services
+                  .filter((s) => (s.category || "other") === c.key)
+                  .slice(0, 4)
+                  .map((s) => s.title)
+                  .join(", ");
+                return (
+                  <Pressable
+                    key={c.key}
+                    onPress={() => {
+                      animate();
+                      setCat(c.key);
+                    }}
+                    style={({ pressed }) => [
+                      styles.catBtn,
+                      { borderColor: look.color },
+                      pressed && styles.pressedSoft
+                    ]}
+                  >
+                    <View style={[styles.catBtnIcon, { backgroundColor: look.color }]}>
+                      <MaterialCommunityIcons name={look.icon} size={30} color={colors.accentText} />
+                    </View>
+                    <View style={styles.flex}>
+                      <Text style={styles.catBtnTitle}>{c.title}</Text>
+                      <Text style={styles.catBtnHint} numberOfLines={2}>
+                        {hint}
+                      </Text>
+                    </View>
+                    <MaterialCommunityIcons name="chevron-right" size={26} color={look.color} />
+                  </Pressable>
+                );
+              })}
+              <Pressable
+                onPress={() => {
+                  animate();
+                  setCat(ALL_CAT);
+                }}
+                style={({ pressed }) => [styles.catBtnAll, pressed && styles.pressedSoft]}
+              >
+                <MaterialCommunityIcons name="view-grid-outline" size={20} color={colors.inkSoft} />
+                <Text style={styles.catBtnAllText}>Все услуги ({services.length})</Text>
+                <MaterialCommunityIcons name="chevron-right" size={22} color={colors.inkFaint} />
+              </Pressable>
+            </View>
+          )}
+        </View>
+      )}
 
-            <Pressable
-              style={({ pressed }) => [styles.allServicesBtn, pressed && styles.pressedSoft]}
-              onPress={() => {
-                animate();
-                setAllOpen((v) => !v);
-              }}
-            >
-              <MaterialCommunityIcons name="view-grid-outline" size={18} color={colors.accent} />
-              <Text style={styles.allServicesText}>Все услуги — техника, мастера и другое</Text>
-              <MaterialCommunityIcons
-                name={allOpen ? "chevron-up" : "chevron-down"}
-                size={20}
-                color={colors.accent}
-              />
-            </Pressable>
-            {allOpen ? (
-              <ServicePicker
-                services={services}
-                categories={categories}
-                selected={selectedService}
-                onSelect={onSelectService}
-              />
-            ) : null}
-          </>
-        )}
-      </View>
-
+      {chosen ? (
+      <>
       <View style={ui.inputGroup}>
         <Text style={ui.label}>Адрес</Text>
         {savedPlaces.length > 0 ? (
@@ -2256,6 +2317,8 @@ function CreateOrderPanel({
           {repeatDays > 0 ? "Опубликовать и подписаться" : "Опубликовать"}
         </Text>
       </Pressable>
+      </>
+      ) : null}
     </View>
   );
 }
@@ -6444,6 +6507,52 @@ const styles = StyleSheet.create({
     marginTop: 2
   },
   allServicesText: { flex: 1, color: colors.accent, fontSize: 14, fontWeight: "700" },
+  catGrid: { gap: 10 },
+  catBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    borderWidth: 1.5,
+    borderRadius: radius,
+    backgroundColor: colors.surface,
+    paddingHorizontal: 14,
+    paddingVertical: 16
+  },
+  catBtnIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 16,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  catBtnTitle: { color: colors.ink, fontSize: 18, fontWeight: "800" },
+  catBtnHint: { color: colors.inkSoft, fontSize: 12, marginTop: 3, lineHeight: 16 },
+  catBtnAll: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius - 4,
+    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: 14,
+    paddingVertical: 12
+  },
+  catBtnAllText: { flex: 1, color: colors.inkSoft, fontSize: 14, fontWeight: "700" },
+  backRow: { flexDirection: "row", alignItems: "center", gap: 4, paddingVertical: 4 },
+  backText: { color: colors.accent, fontSize: 15, fontWeight: "800" },
+  chosenRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius - 4,
+    backgroundColor: colors.surfaceMuted,
+    paddingHorizontal: 12,
+    paddingVertical: 11
+  },
+  changeLink: { color: colors.accent, fontSize: 13, fontWeight: "800" },
   pressedSoft: { opacity: 0.55 },
   filterRow: { gap: 8, paddingVertical: 2, paddingRight: 8 },
   collapse: {
